@@ -1260,6 +1260,17 @@ static void comm_in(int fd, short mask, void *data) {
 		if (len >= 1) {
 			state.authd_stage =
 				(enum authd_stage)((uint8_t)payload[0]);
+			/* authd responds to a wrong/empty credential
+			 * with auth.Retry, which emits startAuthentication
+			 * (no authEvent).  That maps to COMM_MSG_STAGE
+			 * while we are still in AUTH_STATE_VALIDATING.
+			 * Treat it as a failed attempt so the user sees
+			 * "Wrong" before being asked to try again. */
+			if (state.auth_state == AUTH_STATE_VALIDATING) {
+				state.auth_state = AUTH_STATE_INVALID;
+				schedule_auth_idle(&state);
+				++state.failed_attempts;
+			}
 			damage_state(&state);
 		}
 		break;
