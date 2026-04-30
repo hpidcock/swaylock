@@ -26,7 +26,7 @@ extern fn gdk_pixbuf_get_rowstride(pixbuf: ?*const GdkPixbuf) c_int;
 
 /// Sets the Cairo source colour from a packed ARGB u32.
 /// Byte order: RRGGBBAA (most-significant byte = red).
-pub export fn cairo_set_source_u32(
+pub fn setSourceRGBAU32(
     cairo: ?*c.cairo_t,
     color: u32,
 ) void {
@@ -40,7 +40,7 @@ pub export fn cairo_set_source_u32(
 }
 
 /// Converts a Wayland subpixel hint to the Cairo equivalent.
-pub export fn to_cairo_subpixel_order(
+pub fn toSubpixelOrder(
     subpixel: c.wl_output_subpixel,
 ) c.cairo_subpixel_order_t {
     return switch (subpixel) {
@@ -52,7 +52,7 @@ pub export fn to_cairo_subpixel_order(
     };
 }
 
-const GdkExports = if (opts.have_gdk_pixbuf) struct {
+pub const GdkExports = if (opts.have_gdk_pixbuf) struct {
     /// Premultiplies a colour channel by an alpha value, using the
     /// integer rounding approximation from the original C source.
     /// Equivalent to lround(channel * alpha / 255.0) for all values
@@ -65,7 +65,7 @@ const GdkExports = if (opts.have_gdk_pixbuf) struct {
     /// Creates a Cairo ARGB32 image surface from a GdkPixbuf,
     /// premultiplying alpha as required by Cairo.
     /// Returns null on failure.
-    pub export fn gdk_cairo_image_surface_create_from_pixbuf(
+    pub fn createImageSurfaceFromPixbuf(
         gdkbuf: ?*const GdkPixbuf,
     ) ?*c.cairo_surface_t {
         const buf = gdkbuf orelse return null;
@@ -145,8 +145,3 @@ const GdkExports = if (opts.have_gdk_pixbuf) struct {
         return cs;
     }
 } else struct {};
-
-// Force-reference GdkExports so the exported symbol is emitted.
-comptime {
-    _ = GdkExports;
-}

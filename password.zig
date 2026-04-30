@@ -18,26 +18,9 @@ const wl = types.c;
 const log_err: i32 = @intFromEnum(types.LogImportance.err);
 const log_debug: i32 = @intFromEnum(types.LogImportance.debug);
 
-extern fn _swaylock_log(verbosity: i32, fmt: [*c]const u8, ...) void;
-extern fn _swaylock_strip_path(
-    filepath: [*c]const u8,
-) [*c]const u8;
-extern fn comm_main_write(
-    msg_type: u8,
-    payload: ?[*]const u8,
-    len: usize,
-) bool;
-extern fn write_comm_password(pw: *types.SwaylockPassword) bool;
-extern fn loop_add_timer(
-    loop: *types.Loop,
-    ms: i32,
-    callback: types.TimerCallback,
-    data: ?*anyopaque,
-) ?*types.LoopTimer;
-extern fn loop_remove_timer(
-    loop: *types.Loop,
-    timer: *types.LoopTimer,
-) bool;
+const log = @import("log");
+const loop = @import("loop");
+const comm = @import("comm");
 extern fn damage_state(state: *types.SwaylockState) void;
 extern fn utf8_last_size(str: [*c]const u8) i32;
 extern fn utf8_chsize(ch: u32) usize;
@@ -45,42 +28,12 @@ extern fn utf8_encode(str: [*c]u8, ch: u32) usize;
 
 // ── logging helpers ──────────────────────────────────────────────────
 
-fn slog(
-    verbosity: i32,
-    src: std.builtin.SourceLocation,
-    comptime fmt: []const u8,
-    args: anytype,
-) void {
-    var buf: [512]u8 = undefined;
-    const msg = std.fmt.bufPrintZ(&buf, fmt, args) catch return;
-    _swaylock_log(
-        verbosity,
-        "[%s:%d] %s",
-        _swaylock_strip_path(src.file.ptr),
-        @as(c_int, @intCast(src.line)),
-        msg.ptr,
-    );
-}
-
 fn slogErrno(
     verbosity: i32,
     src: std.builtin.SourceLocation,
     comptime fmt: []const u8,
 ) void {
-    const err_num = std.c._errno().*;
-    var buf: [512]u8 = undefined;
-    const msg = std.fmt.bufPrintZ(
-        &buf,
-        fmt ++ ": errno {d}",
-        .{err_num},
-    ) catch return;
-    _swaylock_log(
-        verbosity,
-        "[%s:%d] %s",
-        _swaylock_strip_path(src.file.ptr),
-        @as(c_int, @intCast(src.line)),
-        msg.ptr,
-    );
+    log.slog(verbosity, src, fmt ++ ": errno {d}", .{std.c._errno().*});
 }
 
 // ── password-buffer ──────────────────────────────────────────────────
@@ -95,7 +48,7 @@ fn passwordBufferLock(addr: [*]u8, size: usize) bool {
         if (err == @intFromEnum(std.posix.E.AGAIN)) {
             retries -= 1;
             if (retries == 0) {
-                slog(
+                log.slog(
                     log_err,
                     @src(),
                     "mlock() supported but failed too often.",
@@ -225,11 +178,11 @@ fn setAuthIdle(data: ?*anyopaque) callconv(.c) void {
 
 fn scheduleInputIdle(state: *types.SwaylockState) void {
     if (state.input_idle_timer != null)
-        _ = loop_remove_timer(
+        _ = loop.loopRemoveTimer(
             state.eventloop.?,
             state.input_idle_timer.?,
         );
-    state.input_idle_timer = loop_add_timer(
+    state.input_idle_timer = loop.loopAddTimer(
         state.eventloop.?,
         1500,
         setInputIdle,
@@ -239,7 +192,7 @@ fn scheduleInputIdle(state: *types.SwaylockState) void {
 
 fn cancelInputIdle(state: *types.SwaylockState) void {
     if (state.input_idle_timer != null) {
-        _ = loop_remove_timer(
+        _ = loop.loopRemoveTimer(
             state.eventloop.?,
             state.input_idle_timer.?,
         );
@@ -249,11 +202,11 @@ fn cancelInputIdle(state: *types.SwaylockState) void {
 
 export fn schedule_auth_idle(state: *types.SwaylockState) void {
     if (state.auth_idle_timer != null)
-        _ = loop_remove_timer(
+        _ = loop.loopRemoveTimer(
             state.eventloop.?,
             state.auth_idle_timer.?,
         );
-    state.auth_idle_timer = loop_add_timer(
+    state.auth_idle_timer = loop.loopAddTimer(
         state.eventloop.?,
         3000,
         setAuthIdle,
@@ -272,11 +225,11 @@ fn clearPassword(data: ?*anyopaque) callconv(.c) void {
 
 fn schedulePasswordClear(state: *types.SwaylockState) void {
     if (state.clear_password_timer != null)
-        _ = loop_remove_timer(
+        _ = loop.loopRemoveTimer(
             state.eventloop.?,
             state.clear_password_timer.?,
         );
-    state.clear_password_timer = loop_add_timer(
+    state.clear_password_timer = loop.loopAddTimer(
         state.eventloop.?,
         10000,
         clearPassword,
@@ -286,7 +239,7 @@ fn schedulePasswordClear(state: *types.SwaylockState) void {
 
 fn cancelPasswordClear(state: *types.SwaylockState) void {
     if (state.clear_password_timer != null) {
-        _ = loop_remove_timer(
+        _ = loop.loopRemoveTimer(
             state.eventloop.?,
             state.clear_password_timer.?,
         );
@@ -298,7 +251,7 @@ fn cancelPasswordClear(state: *types.SwaylockState) void {
 
 fn submitPassword(state: *types.SwaylockState) void {
     if (state.args.ignore_empty and state.password.len == 0) {
-        slog(
+        log.slog(
             log_debug,
             @src(),
             "submit_password: skipped (ignore_empty)",
@@ -307,7 +260,7 @@ fn submitPassword(state: *types.SwaylockState) void {
         return;
     }
     if (state.auth_state == types.AuthState.validating) {
-        slog(
+        log.slog(
             log_debug,
             @src(),
             "submit_password: skipped (already validating)",
@@ -315,7 +268,7 @@ fn submitPassword(state: *types.SwaylockState) void {
         );
         return;
     }
-    slog(
+    log.slog(
         log_debug,
         @src(),
         "submit_password: sending (len={d}) auth=idle -> validating",
@@ -325,8 +278,8 @@ fn submitPassword(state: *types.SwaylockState) void {
     state.auth_state = types.AuthState.validating;
     cancelPasswordClear(state);
     cancelInputIdle(state);
-    if (!write_comm_password(&state.password)) {
-        slog(
+    if (!comm.writeCommPassword(&state.password)) {
+        log.slog(
             log_debug,
             @src(),
             "submit_password: write failed auth=validating -> invalid",
@@ -391,7 +344,7 @@ export fn swaylock_handle_key(
                         const id =
                             state.authd_brokers.?[@intCast(sel)].id;
                         if (id != null)
-                            _ = comm_main_write(
+                            _ = comm.commMainWrite(
                                 types.CommMsg.broker_sel,
                                 id,
                                 std.mem.len(id.?) + 1,
@@ -407,7 +360,7 @@ export fn swaylock_handle_key(
                                 @intCast(sel)
                             ].id;
                         if (id != null)
-                            _ = comm_main_write(
+                            _ = comm.commMainWrite(
                                 types.CommMsg.auth_mode_sel,
                                 id,
                                 std.mem.len(id.?) + 1,
@@ -416,7 +369,7 @@ export fn swaylock_handle_key(
                 }
                 return;
             } else if (keysym == wl.XKB_KEY_Escape) {
-                _ = comm_main_write(types.CommMsg.cancel, null, 0);
+                _ = comm.commMainWrite(types.CommMsg.cancel, null, 0);
                 return;
             }
         }
@@ -424,7 +377,7 @@ export fn swaylock_handle_key(
             if (keysym == wl.XKB_KEY_Tab and
                 state.authd_layout.button != null)
             {
-                _ = comm_main_write(types.CommMsg.button, null, 0);
+                _ = comm.commMainWrite(types.CommMsg.button, null, 0);
                 damage_state(state);
                 return;
             }

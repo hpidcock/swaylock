@@ -225,6 +225,18 @@ pub fn build(b: *std.Build) void {
         }
     }
 
+    const log_options = b.addOptions();
+    log_options.addOption(bool, "have_debug_overlay", debug_overlay);
+
+    const log_mod = b.createModule(.{
+        .root_source_file = b.path("log.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    log_mod.addImport("log_options", log_options.createModule());
+    log_mod.addImport("types", types_mod);
+
     // exe_mod carries library links; objects are added as LazyPaths
     // from the cc compilation steps above.
     const exe_mod = b.createModule(.{
@@ -284,6 +296,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     seat_mod.addImport("types", types_mod);
+    seat_mod.addImport("log", log_mod);
     seat_mod.addIncludePath(b.path("include"));
     seat_mod.addIncludePath(proto_h_dir);
     for (sys_includes.items) |flag| {
@@ -351,6 +364,8 @@ pub fn build(b: *std.Build) void {
         bg_image_options.createModule(),
     );
     bg_image_mod.addImport("types", types_mod);
+    bg_image_mod.addImport("log", log_mod);
+    bg_image_mod.addImport("cairo", cairo_mod);
     bg_image_mod.addIncludePath(b.path("include"));
     bg_image_mod.addIncludePath(proto_h_dir);
     for (sys_includes.items) |flag| {
@@ -367,12 +382,6 @@ pub fn build(b: *std.Build) void {
             }
         }
     }
-    const bg_image_obj = b.addObject(.{
-        .name = "background-image",
-        .root_module = bg_image_mod,
-    });
-    exe_mod.addObjectFile(bg_image_obj.getEmittedBin());
-
     // Compile loop.zig as a Zig object; it replaces loop.c.
     const loop_mod = b.createModule(.{
         .root_source_file = b.path("loop.zig"),
@@ -381,6 +390,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     loop_mod.addImport("types", types_mod);
+    loop_mod.addImport("log", log_mod);
     loop_mod.addIncludePath(b.path("include"));
     loop_mod.addIncludePath(proto_h_dir);
     for (sys_includes.items) |flag| {
@@ -400,6 +410,7 @@ pub fn build(b: *std.Build) void {
         .root_module = loop_mod,
     });
     exe_mod.addObjectFile(loop_obj.getEmittedBin());
+    seat_mod.addImport("loop", loop_mod);
 
     // Compile render.zig as a Zig object; it replaces render.c.
     const render_options = b.addOptions();
@@ -416,9 +427,6 @@ pub fn build(b: *std.Build) void {
     main_options.addOption([]const u8, "sysconfdir", sysconfdir);
     main_options.addOption([]const u8, "swaylock_version", "1.8.5");
 
-    const log_options = b.addOptions();
-    log_options.addOption(bool, "have_debug_overlay", debug_overlay);
-
     const render_mod = b.createModule(.{
         .root_source_file = b.path("render.zig"),
         .target = target,
@@ -427,6 +435,9 @@ pub fn build(b: *std.Build) void {
     });
     render_mod.addImport("render_options", render_options.createModule());
     render_mod.addImport("types", types_mod);
+    render_mod.addImport("log", log_mod);
+    render_mod.addImport("background_image", bg_image_mod);
+    render_mod.addImport("cairo", cairo_mod);
     render_mod.addIncludePath(b.path("include"));
     render_mod.addIncludePath(proto_h_dir);
     for (sys_includes.items) |flag| {
@@ -455,6 +466,10 @@ pub fn build(b: *std.Build) void {
     });
     main_mod.addImport("main_options", main_options.createModule());
     main_mod.addImport("types", types_mod);
+    main_mod.addImport("log", log_mod);
+    main_mod.addImport("loop", loop_mod);
+    main_mod.addImport("background_image", bg_image_mod);
+    main_mod.addImport("cairo", cairo_mod);
     main_mod.addIncludePath(b.path("include"));
     main_mod.addIncludePath(proto_h_dir);
     for (sys_includes.items) |flag| {
@@ -484,6 +499,8 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     password_mod.addImport("types", types_mod);
+    password_mod.addImport("log", log_mod);
+    password_mod.addImport("loop", loop_mod);
     password_mod.addIncludePath(b.path("include"));
     password_mod.addIncludePath(proto_h_dir);
     for (sys_includes.items) |flag| {
@@ -511,6 +528,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     comm_mod.addImport("types", types_mod);
+    comm_mod.addImport("log", log_mod);
     comm_mod.addIncludePath(b.path("include"));
     comm_mod.addIncludePath(proto_h_dir);
     for (sys_includes.items) |flag| {
@@ -530,15 +548,9 @@ pub fn build(b: *std.Build) void {
         .root_module = comm_mod,
     });
     exe_mod.addObjectFile(comm_obj.getEmittedBin());
+    main_mod.addImport("comm", comm_mod);
+    password_mod.addImport("comm", comm_mod);
 
-    const log_mod = b.createModule(.{
-        .root_source_file = b.path("log.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-    });
-    log_mod.addImport("log_options", log_options.createModule());
-    log_mod.addImport("types", types_mod);
     const log_obj = b.addObject(.{
         .name = "log",
         .root_module = log_mod,
@@ -561,6 +573,8 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
         });
         pam_mod.addImport("types", types_mod);
+        pam_mod.addImport("log", log_mod);
+        pam_mod.addImport("comm", comm_mod);
         pam_mod.addIncludePath(b.path("include"));
         pam_mod.addIncludePath(proto_h_dir);
         for (sys_includes.items) |flag| {

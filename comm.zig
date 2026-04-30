@@ -6,23 +6,11 @@ const types = @import("types");
 
 const log_err: i32 = @intFromEnum(types.LogImportance.err);
 
-extern fn _swaylock_log(verbosity: i32, fmt: [*c]const u8, ...) void;
-extern fn _swaylock_strip_path(filepath: [*c]const u8) [*c]const u8;
+const log = @import("log");
+
 extern fn password_buffer_create(size: usize) ?[*]u8;
 extern fn password_buffer_destroy(buffer: ?[*]u8, size: usize) void;
 extern fn clear_password_buffer(pw: *types.SwaylockPassword) void;
-
-const c = @cImport({
-    @cDefine("_POSIX_C_SOURCE", "200809L");
-    @cDefine("_DEFAULT_SOURCE", "1");
-    @cInclude("errno.h");
-    @cInclude("fcntl.h");
-    @cInclude("signal.h");
-    @cInclude("stdlib.h");
-    @cInclude("string.h");
-    @cInclude("sys/types.h");
-    @cInclude("unistd.h");
-});
 
 extern fn run_pw_backend_child() void;
 
@@ -33,55 +21,26 @@ const comm_max_payload: usize = 1 << 20;
 // comm_fds[1]: child→main  (child writes [1], main reads [0])
 var comm_fds: [2][2]i32 = .{ .{ -1, -1 }, .{ -1, -1 } };
 
-fn slog(
-    verbosity: anytype,
-    src: std.builtin.SourceLocation,
-    comptime fmt: []const u8,
-    args: anytype,
-) void {
-    var buf: [512]u8 = undefined;
-    const msg = std.fmt.bufPrintZ(&buf, fmt, args) catch return;
-    _swaylock_log(
-        verbosity,
-        "[%s:%d] %s",
-        _swaylock_strip_path(src.file.ptr),
-        @as(c_int, @intCast(src.line)),
-        msg.ptr,
-    );
-}
-
 fn slogErrno(
-    verbosity: anytype,
+    verbosity: i32,
     src: std.builtin.SourceLocation,
     comptime msg: []const u8,
+    err: anyerror,
 ) void {
-    const err = c.__errno_location().*;
-    var buf: [512]u8 = undefined;
-    const fmtd = std.fmt.bufPrintZ(
-        &buf,
-        msg ++ ": {s}",
-        .{std.mem.sliceTo(c.strerror(err), 0)},
-    ) catch return;
-    _swaylock_log(
-        verbosity,
-        "[%s:%d] %s",
-        _swaylock_strip_path(src.file.ptr),
-        @as(c_int, @intCast(src.line)),
-        fmtd.ptr,
-    );
+    log.slog(verbosity, src, msg ++ ": {s}", .{@errorName(err)});
 }
 
 fn readFull(fd: i32, dst: []u8) isize {
     var offset: usize = 0;
     while (offset < dst.len) {
-        const n = c.read(fd, @ptrCast(dst[offset..].ptr), dst.len - offset);
-        if (n < 0) {
-            if (c.__errno_location().* == c.EINTR) continue;
-            slogErrno(log_err, @src(), "read() failed");
+        const n = std.posix.read(fd, dst[offset..]) catch |err| {
+            if (err == error.Interrupted) continue;
+            slogErrno(log_err, @src(), "read() failed", err);
             return -1;
-        } else if (n == 0) {
+        };
+        if (n == 0) {
             if (offset == 0) return 0;
-            slog(
+            log.slog(
                 log_err,
                 @src(),
                 "read() failed: unexpected EOF",
@@ -89,7 +48,7 @@ fn readFull(fd: i32, dst: []u8) isize {
             );
             return -1;
         }
-        offset += @intCast(n);
+        offset += n;
     }
     return @intCast(offset);
 }
@@ -97,17 +56,16 @@ fn readFull(fd: i32, dst: []u8) isize {
 fn writeFull(fd: i32, src: []const u8) bool {
     var offset: usize = 0;
     while (offset < src.len) {
-        const n = c.write(
-            fd,
-            @ptrCast(src[offset..].ptr),
-            src.len - offset,
-        );
-        if (n <= 0) {
-            if (c.__errno_location().* == c.EINTR) continue;
-            slogErrno(log_err, @src(), "write() failed");
+        const n = std.posix.write(fd, src[offset..]) catch |err| {
+            if (err == error.Interrupted) continue;
+            slogErrno(log_err, @src(), "write() failed", err);
+            return false;
+        };
+        if (n == 0) {
+            log.slog(log_err, @src(), "write() returned 0", .{});
             return false;
         }
-        offset += @intCast(n);
+        offset += n;
     }
     return true;
 }
@@ -145,7 +103,7 @@ fn commRead(
     }
     const plen: usize = loadLe32(&plen_buf);
     if (plen > comm_max_payload) {
-        slog(
+        log.slog(
             log_err,
             @src(),
             "comm_read: payload too large: {d}",
@@ -156,15 +114,15 @@ fn commRead(
     }
     var buf: ?[*]u8 = null;
     if (plen > 0) {
-        buf = @ptrCast(c.malloc(plen + 1));
+        buf = @ptrCast(std.c.malloc(plen + 1));
         if (buf == null) {
-            slog(log_err, @src(), "allocation failed", .{});
+            log.slog(log_err, @src(), "allocation failed", .{});
             payload.* = null;
             return -1;
         }
         n = readFull(fd, buf.?[0..plen]);
         if (n <= 0) {
-            c.free(@ptrCast(buf));
+            std.c.free(@ptrCast(buf));
             payload.* = null;
             return -1;
         }
@@ -192,15 +150,17 @@ fn commWrite(
 }
 
 /// Returns the fd the child reads incoming messages from.
-export fn get_comm_child_fd() i32 {
+pub fn getCommChildFd() i32 {
     return comm_fds[0][0];
 }
 
-export fn comm_child_read(payload: *?[*]u8, len: *usize) i32 {
+/// Reads a message from the child-facing pipe.
+pub fn commChildRead(payload: *?[*]u8, len: *usize) i32 {
     return commRead(comm_fds[0][0], payload, len);
 }
 
-export fn comm_child_write(
+/// Writes a message to the child-facing pipe.
+pub fn commChildWrite(
     msg_type: u8,
     payload: ?[*]const u8,
     len: usize,
@@ -208,11 +168,13 @@ export fn comm_child_write(
     return commWrite(comm_fds[1][1], msg_type, payload, len);
 }
 
-export fn comm_main_read(payload: *?[*]u8, len: *usize) i32 {
+/// Reads a message from the main-facing pipe.
+pub fn commMainRead(payload: *?[*]u8, len: *usize) i32 {
     return commRead(comm_fds[1][0], payload, len);
 }
 
-export fn comm_main_write(
+/// Writes a message to the main-facing pipe.
+pub fn commMainWrite(
     msg_type: u8,
     payload: ?[*]const u8,
     len: usize,
@@ -221,13 +183,13 @@ export fn comm_main_write(
 }
 
 /// Returns the fd to poll for messages from the child.
-export fn get_comm_reply_fd() i32 {
+pub fn getCommReplyFd() i32 {
     return comm_fds[1][0];
 }
 
 /// Clears and sends the password buffer as a COMM_MSG_PASSWORD frame.
 /// The password buffer is always cleared before returning.
-export fn write_comm_password(pw: *types.SwaylockPassword) bool {
+pub fn writeCommPassword(pw: *types.SwaylockPassword) bool {
     const size: usize = @intCast(pw.len + 1);
     const copy = password_buffer_create(size);
     if (copy == null) {
@@ -246,37 +208,52 @@ export fn write_comm_password(pw: *types.SwaylockPassword) bool {
     return ok;
 }
 
-export fn spawn_comm_child() bool {
-    if (c.pipe(&comm_fds[0][0]) != 0) {
-        slogErrno(log_err, @src(), "failed to create pipe");
+/// Spawns the comm child process.
+pub fn spawnCommChild() bool {
+    const fds0 = std.posix.pipe() catch |err| {
+        slogErrno(log_err, @src(), "failed to create pipe", err);
         return false;
-    }
-    if (c.pipe(&comm_fds[1][0]) != 0) {
-        slogErrno(log_err, @src(), "failed to create pipe");
+    };
+    comm_fds[0] = fds0;
+    const fds1 = std.posix.pipe() catch |err| {
+        slogErrno(log_err, @src(), "failed to create pipe", err);
         return false;
-    }
-    const child = c.fork();
-    if (child < 0) {
-        slogErrno(log_err, @src(), "failed to fork");
+    };
+    comm_fds[1] = fds1;
+    const child = std.posix.fork() catch |err| {
+        slogErrno(log_err, @src(), "failed to fork", err);
         return false;
-    } else if (child == 0) {
-        _ = c.signal(c.SIGUSR1, c.SIG_IGN);
-        _ = c.close(comm_fds[0][1]);
-        _ = c.close(comm_fds[1][0]);
+    };
+    if (child == 0) {
+        const act = std.posix.Sigaction{
+            .handler = .{ .handler = std.posix.SIG.IGN },
+            .mask = std.posix.empty_sigset,
+            .flags = 0,
+        };
+        std.posix.sigaction(
+            std.posix.SIG.USR1,
+            &act,
+            null,
+        );
+        std.posix.close(comm_fds[0][1]);
+        std.posix.close(comm_fds[1][0]);
         // Redirect stdin and stdout to /dev/null so the PAM
         // module cannot fall back to prompting on the terminal
         // if the main process exits or authd is unavailable.
-        const devnull = c.open("/dev/null", c.O_RDWR);
-        if (devnull >= 0) {
-            _ = c.dup2(devnull, c.STDIN_FILENO);
-            _ = c.dup2(devnull, c.STDOUT_FILENO);
-            if (devnull > c.STDOUT_FILENO) _ = c.close(devnull);
-        }
+        if (std.posix.open(
+            "/dev/null",
+            .{ .ACCMODE = .RDWR },
+            0,
+        )) |devnull| {
+            std.posix.dup2(devnull, 0) catch {};
+            std.posix.dup2(devnull, 1) catch {};
+            if (devnull > 1) std.posix.close(devnull);
+        } else |_| {}
         run_pw_backend_child();
         // run_pw_backend_child calls exit(); unreachable
-        c.abort();
+        unreachable;
     }
-    _ = c.close(comm_fds[0][0]);
-    _ = c.close(comm_fds[1][1]);
+    std.posix.close(comm_fds[0][0]);
+    std.posix.close(comm_fds[1][1]);
     return true;
 }

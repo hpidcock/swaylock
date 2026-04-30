@@ -26,35 +26,11 @@ const log_err: i32 = @intFromEnum(types.LogImportance.err);
 const log_info: i32 = @intFromEnum(types.LogImportance.info);
 const log_debug: i32 = @intFromEnum(types.LogImportance.debug);
 
-// Log functions via C ABI (defined in log.zig).
-extern fn _swaylock_log(verbosity: i32, fmt: [*c]const u8, ...) void;
-extern fn _swaylock_strip_path(
-    filepath: [*c]const u8,
-) [*c]const u8;
-extern fn swaylock_log_init(verbosity: i32) void;
+const log = @import("log");
+const background_image = @import("background_image");
 
-// Loop functions.
-extern fn loop_create() ?*types.Loop;
-extern fn loop_destroy(loop: *types.Loop) void;
-extern fn loop_poll(loop: *types.Loop) void;
-extern fn loop_add_fd(
-    loop: *types.Loop,
-    fd: i32,
-    mask: i16,
-    callback: types.FdCallback,
-    data: ?*anyopaque,
-) void;
-extern fn loop_remove_fd(loop: *types.Loop, fd: i32) bool;
-extern fn loop_add_timer(
-    loop: *types.Loop,
-    ms: i32,
-    callback: types.TimerCallback,
-    data: ?*anyopaque,
-) ?*types.LoopTimer;
-extern fn loop_remove_timer(
-    loop: *types.Loop,
-    timer: *types.LoopTimer,
-) bool;
+const loop = @import("loop");
+const comm = @import("comm");
 
 // Pool-buffer functions.
 extern fn get_next_buffer(
@@ -71,34 +47,6 @@ extern fn create_buffer(
     format: u32,
 ) ?*types.PoolBuffer;
 extern fn destroy_buffer(buffer: *types.PoolBuffer) void;
-
-// Cairo helper functions.
-extern fn cairo_set_source_u32(
-    cairo: ?*types.c.cairo_t,
-    color: u32,
-) void;
-extern fn to_cairo_subpixel_order(
-    subpixel: wl.wl_output_subpixel,
-) types.c.cairo_subpixel_order_t;
-
-// Background image functions.
-extern fn parse_background_mode(
-    mode: [*c]const u8,
-) types.BackgroundMode;
-extern fn load_background_image(
-    path: [*c]const u8,
-) ?*types.c.cairo_surface_t;
-
-// Comm functions.
-extern fn spawn_comm_child() bool;
-extern fn comm_main_read(payload: *?[*]u8, len: *usize) i32;
-extern fn comm_main_write(
-    msg_type: u8,
-    payload: ?[*]const u8,
-    len: usize,
-) bool;
-extern fn get_comm_reply_fd() i32;
-extern fn write_comm_password(pw: *types.SwaylockPassword) bool;
 
 // Password functions.
 extern fn swaylock_handle_key(
@@ -139,24 +87,6 @@ var state: types.SwaylockState = std.mem.zeroes(types.SwaylockState);
 
 const LineMode = enum { line, inside, ring };
 
-/// Emit a log message with source location prepended.
-fn slog(
-    verbosity: i32,
-    src: std.builtin.SourceLocation,
-    comptime fmt: []const u8,
-    args: anytype,
-) void {
-    var buf: [512]u8 = undefined;
-    const msg = std.fmt.bufPrintZ(&buf, fmt, args) catch return;
-    _swaylock_log(
-        verbosity,
-        "[%s:%d] %s",
-        _swaylock_strip_path(src.file.ptr),
-        @as(c_int, @intCast(src.line)),
-        msg.ptr,
-    );
-}
-
 /// Return the struct enclosing a wl_list node pointer.
 /// Accepts any pointer type to avoid cImport-namespace mismatches.
 fn wlEntry(
@@ -179,7 +109,7 @@ fn parseColor(color_in: [*c]const u8) u32 {
     if (color[0] == '#') color += 1;
     const len = c.strlen(color);
     if (len != 6 and len != 8) {
-        slog(
+        log.slog(
             log_debug,
             @src(),
             "Invalid color {s}, defaulting to 0xFFFFFFFF",
@@ -202,7 +132,7 @@ fn lenientStrcmp(a: ?[*:0]const u8, b: ?[*:0]const u8) i32 {
 fn daemonize() void {
     var fds: [2]i32 = undefined;
     if (c.pipe(&fds) != 0) {
-        slog(log_err, @src(), "Failed to pipe", .{});
+        log.slog(log_err, @src(), "Failed to pipe", .{});
         c.exit(1);
     }
     if (c.fork() == 0) {
@@ -224,7 +154,7 @@ fn daemonize() void {
         _ = c.close(fds[1]);
         var success: u8 = undefined;
         if (c.read(fds[0], &success, 1) != 1 or success == 0) {
-            slog(log_err, @src(), "Failed to daemonize", .{});
+            log.slog(log_err, @src(), "Failed to daemonize", .{});
             c.exit(1);
         }
         _ = c.close(fds[0]);
@@ -484,7 +414,7 @@ fn extSessionLockV1HandleFinished(
         st.lock_failed = true;
         return;
     }
-    slog(
+    log.slog(
         log_err,
         @src(),
         "Failed to lock session -- is another lockscreen running?",
@@ -709,7 +639,7 @@ fn loadImage(arg: [*c]u8, st: *types.SwaylockState) void {
             image.output_name,
         ) == 0) {
             if (image.output_name != null) {
-                slog(
+                log.slog(
                     log_debug,
                     @src(),
                     "Replacing image defined for output {s} with {s}",
@@ -719,7 +649,7 @@ fn loadImage(arg: [*c]u8, st: *types.SwaylockState) void {
                     },
                 );
             } else {
-                slog(
+                log.slog(
                     log_debug,
                     @src(),
                     "Replacing default image with {s}",
@@ -748,13 +678,15 @@ fn loadImage(arg: [*c]u8, st: *types.SwaylockState) void {
         image.path = @ptrCast(joinArgs(p.we_wordv, @intCast(p.we_wordc)));
         c.wordfree(&p);
     }
-    image.cairo_surface = load_background_image(@ptrCast(image.path));
+    image.cairo_surface = background_image.loadBackgroundImage(
+        std.mem.span(image.path.?),
+    );
     if (image.cairo_surface == null) {
         std.heap.c_allocator.destroy(image);
         return;
     }
     wl.wl_list_insert(&st.images, &image.link);
-    slog(
+    log.slog(
         log_debug,
         @src(),
         "Loaded image {s} for output {s}",
@@ -1054,7 +986,7 @@ fn parseOptions(
                 if (st) |s|
                     s.args.colors.background = parseColor(optarg);
             },
-            'd' => swaylock_log_init(log_debug),
+            'd' => log.logInit(log_debug),
             'e' => {
                 if (st) |s| s.args.ignore_empty = true;
             },
@@ -1097,7 +1029,9 @@ fn parseOptions(
             },
             's' => {
                 if (st) |s| {
-                    s.args.mode = parse_background_mode(optarg);
+                    s.args.mode = background_image.parseBackgroundMode(
+                        std.mem.sliceTo(optarg, 0),
+                    );
                     if (s.args.mode == .invalid)
                         return 1;
                 }
@@ -1325,7 +1259,7 @@ fn loadConfig(
 ) c_int {
     const config = c.fopen(path, "r");
     if (config == null) {
-        slog(
+        log.slog(
             log_err,
             @src(),
             "Failed to read config. Running without it.",
@@ -1349,7 +1283,7 @@ fn loadConfig(
             line[nread_u] = 0;
         }
         if (line[0] == 0 or line[0] == '#') continue;
-        slog(
+        log.slog(
             log_debug,
             @src(),
             "Config Line #{d}: {s}",
@@ -1357,7 +1291,7 @@ fn loadConfig(
         );
         const flag: [*c]u8 = @ptrCast(c.malloc(nread_u + 3));
         if (flag == null) {
-            slog(log_err, @src(), "Failed to allocate memory", .{});
+            log.slog(log_err, @src(), "Failed to allocate memory", .{});
             return 0;
         }
         _ = c.sprintf(flag, "--%s", line);
@@ -1407,7 +1341,7 @@ fn commIn(
     _ = fd;
     _ = data;
     if ((mask & wl.POLLERR) != 0) {
-        slog(
+        log.slog(
             log_err,
             @src(),
             "Password checking subprocess crashed; exiting.",
@@ -1417,7 +1351,7 @@ fn commIn(
     }
     if ((mask & wl.POLLIN) == 0) {
         if ((mask & wl.POLLHUP) != 0) {
-            slog(
+            log.slog(
                 log_err,
                 @src(),
                 "Password checking subprocess exited unexpectedly; exiting.",
@@ -1429,11 +1363,11 @@ fn commIn(
     }
     var payload: ?[*]u8 = null;
     var len: usize = 0;
-    const msg_type = comm_main_read(&payload, &len);
+    const msg_type = comm.commMainRead(&payload, &len);
     defer c.free(@ptrCast(payload));
     if (msg_type <= 0) {
         if (msg_type == 0) c.exit(c.EXIT_FAILURE);
-        slog(
+        log.slog(
             log_err,
             @src(),
             "comm_main_read failed; exiting.",
@@ -1441,7 +1375,7 @@ fn commIn(
         );
         c.exit(c.EXIT_FAILURE);
     }
-    slog(
+    log.slog(
         log_debug,
         @src(),
         "comm_in: msg=0x{x:0>2} len={d} auth={s} stage={s}",
@@ -1457,7 +1391,7 @@ fn commIn(
     switch (msg_type) {
         types.CommMsg.auth_result => {
             if (len >= 1 and payload != null and payload.?[0] == 0x01) {
-                slog(
+                log.slog(
                     log_debug,
                     @src(),
                     "comm_in: AUTH_RESULT granted -> unlocking",
@@ -1465,7 +1399,7 @@ fn commIn(
                 );
                 state.run_display = false;
             } else {
-                slog(
+                log.slog(
                     log_debug,
                     @src(),
                     "comm_in: AUTH_RESULT denied auth={s} -> invalid",
@@ -1489,7 +1423,7 @@ fn commIn(
             parseBrokers(payload_slice);
             state.authd_active = true;
             state.authd_stage = .broker;
-            slog(
+            log.slog(
                 log_debug,
                 @src(),
                 "comm_in: BROKERS n={d} -> stage=broker",
@@ -1509,7 +1443,7 @@ fn commIn(
             parseAuthModes(payload_slice);
             state.authd_active = true;
             state.authd_stage = .auth_mode;
-            slog(
+            log.slog(
                 log_debug,
                 @src(),
                 "comm_in: AUTH_MODES n={d} -> stage=auth_mode",
@@ -1523,7 +1457,7 @@ fn commIn(
             c.free(@ptrCast(state.authd_error));
             state.authd_error = null;
             parseUiLayout(payload_slice);
-            slog(
+            log.slog(
                 log_debug,
                 @src(),
                 "comm_in: UI_LAYOUT type={s} label={s} entry={s} " ++
@@ -1545,7 +1479,7 @@ fn commIn(
                 const new_stage: types.AuthdStage =
                     @enumFromInt(@as(c_int, payload.?[0]));
                 if (state.auth_state == .validating) {
-                    slog(
+                    log.slog(
                         log_debug,
                         @src(),
                         "comm_in: STAGE {s} -> {s} while validating:" ++
@@ -1559,7 +1493,7 @@ fn commIn(
                     schedule_auth_idle(&state);
                     state.failed_attempts += 1;
                 } else {
-                    slog(
+                    log.slog(
                         log_debug,
                         @src(),
                         "comm_in: STAGE {s} -> {s} auth={s}",
@@ -1579,7 +1513,7 @@ fn commIn(
             c.free(@ptrCast(state.authd_error));
             state.authd_error = null;
             parseAuthEvent(payload_slice);
-            slog(
+            log.slog(
                 log_debug,
                 @src(),
                 "comm_in: AUTH_EVENT msg={s} auth={s} -> idle",
@@ -1729,11 +1663,11 @@ fn logInit(argc: c_int, argv: [*c][*c]u8) void {
         );
         if (ch == -1) break;
         if (ch == 'd') {
-            swaylock_log_init(log_debug);
+            log.logInit(log_debug);
             return;
         }
     }
-    swaylock_log_init(log_err);
+    log.logInit(log_err);
 }
 
 export fn main(argc: c_int, argv: [*c][*c]u8) c_int {
@@ -1784,7 +1718,7 @@ export fn main(argc: c_int, argv: [*c][*c]u8) c_int {
     if (config_path == null)
         config_path = getConfigPath() orelse null;
     if (config_path != null) {
-        slog(
+        log.slog(
             log_debug,
             @src(),
             "Found config at {s}",
@@ -1799,7 +1733,7 @@ export fn main(argc: c_int, argv: [*c][*c]u8) c_int {
         }
     }
     if (argc > 1) {
-        slog(log_debug, @src(), "Parsing CLI Args", .{});
+        log.slog(log_debug, @src(), "Parsing CLI Args", .{});
         result = parseOptions(argc, argv, &state, &line_mode, null);
         if (result != 0) {
             c.free(@ptrCast(state.args.font));
@@ -1820,11 +1754,11 @@ export fn main(argc: c_int, argv: [*c][*c]u8) c_int {
     state.password.buffer.?[0] = 0;
 
     if (c.pipe(@ptrCast(&sigusr_fds)) != 0) {
-        slog(log_err, @src(), "Failed to pipe", .{});
+        log.slog(log_err, @src(), "Failed to pipe", .{});
         return c.EXIT_FAILURE;
     }
     if (c.fcntl(sigusr_fds[1], c.F_SETFL, c.O_NONBLOCK) == -1) {
-        slog(
+        log.slog(
             log_err,
             @src(),
             "Failed to make pipe end nonblocking",
@@ -1839,7 +1773,7 @@ export fn main(argc: c_int, argv: [*c][*c]u8) c_int {
     state.display = wl.wl_display_connect(null);
     if (state.display == null) {
         c.free(@ptrCast(state.args.font));
-        slog(
+        log.slog(
             log_err,
             @src(),
             "Unable to connect to the compositor. " ++
@@ -1849,7 +1783,7 @@ export fn main(argc: c_int, argv: [*c][*c]u8) c_int {
         );
         return c.EXIT_FAILURE;
     }
-    state.eventloop = loop_create();
+    state.eventloop = loop.loopCreate();
 
     const registry =
         wl.wl_display_get_registry(state.display);
@@ -1859,7 +1793,7 @@ export fn main(argc: c_int, argv: [*c][*c]u8) c_int {
         &state,
     );
     if (wl.wl_display_roundtrip(state.display) == -1) {
-        slog(
+        log.slog(
             log_err,
             @src(),
             "wl_display_roundtrip() failed",
@@ -1869,19 +1803,19 @@ export fn main(argc: c_int, argv: [*c][*c]u8) c_int {
     }
 
     if (state.compositor == null) {
-        slog(log_err, @src(), "Missing wl_compositor", .{});
+        log.slog(log_err, @src(), "Missing wl_compositor", .{});
         return 1;
     }
     if (state.subcompositor == null) {
-        slog(log_err, @src(), "Missing wl_subcompositor", .{});
+        log.slog(log_err, @src(), "Missing wl_subcompositor", .{});
         return 1;
     }
     if (state.shm == null) {
-        slog(log_err, @src(), "Missing wl_shm", .{});
+        log.slog(log_err, @src(), "Missing wl_shm", .{});
         return 1;
     }
     if (state.ext_session_lock_manager_v1 == null) {
-        slog(
+        log.slog(
             log_err,
             @src(),
             "Missing ext-session-lock-v1",
@@ -1902,7 +1836,7 @@ export fn main(argc: c_int, argv: [*c][*c]u8) c_int {
         );
         while (!state.locked and !state.lock_failed) {
             if (wl.wl_display_dispatch(state.display) < 0) {
-                slog(
+                log.slog(
                     log_err,
                     @src(),
                     "wl_display_dispatch() failed",
@@ -1912,7 +1846,7 @@ export fn main(argc: c_int, argv: [*c][*c]u8) c_int {
             }
         }
         if (!state.locked) {
-            slog(
+            log.slog(
                 log_err,
                 @src(),
                 "Compositor refused the lock; " ++
@@ -1961,7 +1895,7 @@ export fn main(argc: c_int, argv: [*c][*c]u8) c_int {
 
     while (!state.locked) {
         if (wl.wl_display_dispatch(state.display) < 0) {
-            slog(
+            log.slog(
                 log_err,
                 @src(),
                 "wl_display_dispatch() failed",
@@ -1973,7 +1907,7 @@ export fn main(argc: c_int, argv: [*c][*c]u8) c_int {
 
     if (state.args.ready_fd >= 0) {
         if (c.write(state.args.ready_fd, "\n", 1) != 1) {
-            slog(
+            log.slog(
                 log_err,
                 @src(),
                 "Failed to send readiness notification",
@@ -1986,21 +1920,21 @@ export fn main(argc: c_int, argv: [*c][*c]u8) c_int {
     }
     if (state.args.daemonize) daemonize();
 
-    loop_add_fd(
+    loop.loopAddFd(
         state.eventloop.?,
         wl.wl_display_get_fd(state.display),
         @as(i16, @intCast(wl.POLLIN)),
         displayIn,
         null,
     );
-    loop_add_fd(
+    loop.loopAddFd(
         state.eventloop.?,
-        get_comm_reply_fd(),
+        comm.getCommReplyFd(),
         @as(i16, @intCast(wl.POLLIN)),
         commIn,
         null,
     );
-    loop_add_fd(
+    loop.loopAddFd(
         state.eventloop.?,
         sigusr_fds[0],
         @as(i16, @intCast(wl.POLLIN)),
@@ -2036,7 +1970,7 @@ export fn main(argc: c_int, argv: [*c][*c]u8) c_int {
         {
             break;
         }
-        loop_poll(state.eventloop.?);
+        loop.loopPoll(state.eventloop.?);
     }
 
     wl.ext_session_lock_v1_unlock_and_destroy(state.ext_session_lock_v1);

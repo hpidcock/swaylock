@@ -18,47 +18,14 @@ const wl = types.c;
 
 const log_err: i32 = @intFromEnum(types.LogImportance.err);
 
-extern fn _swaylock_log(
-    verbosity: c_int,
-    fmt: [*c]const u8,
-    ...,
-) void;
-extern fn _swaylock_strip_path(
-    filepath: [*c]const u8,
-) [*c]const u8;
-extern fn loop_add_timer(
-    loop: *types.Loop,
-    ms: i32,
-    callback: types.TimerCallback,
-    data: ?*anyopaque,
-) ?*types.LoopTimer;
-extern fn loop_remove_timer(
-    loop: *types.Loop,
-    timer: *types.LoopTimer,
-) bool;
+const log = @import("log");
+const loop = @import("loop");
 extern fn swaylock_handle_key(
     state: *types.SwaylockState,
     keysym: types.c.xkb_keysym_t,
     codepoint: u32,
 ) void;
 extern fn damage_state(state: *types.SwaylockState) void;
-
-fn slog(
-    verbosity: i32,
-    src: std.builtin.SourceLocation,
-    comptime fmt: []const u8,
-    args: anytype,
-) void {
-    var buf: [256]u8 = undefined;
-    const msg = std.fmt.bufPrintZ(&buf, fmt, args) catch return;
-    _swaylock_log(
-        verbosity,
-        "[%s:%d] %s",
-        _swaylock_strip_path(src.file.ptr),
-        @as(c_int, @intCast(src.line)),
-        msg.ptr,
-    );
-}
 
 fn keyboardKeymap(
     data: ?*anyopaque,
@@ -93,7 +60,7 @@ fn keyboardKeymap(
                 @intFromPtr(raw.?) == std.math.maxInt(usize))
             {
                 _ = std.c.close(fd);
-                slog(
+                log.slog(
                     log_err,
                     @src(),
                     "Unable to initialise keymap shm, aborting",
@@ -152,7 +119,7 @@ fn keyboardLeave(
 fn keyboardRepeat(data: ?*anyopaque) callconv(.c) void {
     const seat: *types.SwaylockSeat = @ptrCast(@alignCast(data.?));
     const state = seat.state.?;
-    seat.repeat_timer = loop_add_timer(
+    seat.repeat_timer = loop.loopAddTimer(
         state.eventloop.?,
         seat.repeat_period_ms,
         keyboardRepeat,
@@ -191,7 +158,7 @@ fn keyboardKey(
     if (key_state_raw == pressed)
         swaylock_handle_key(state, sym, codepoint);
     if (seat.repeat_timer != null) {
-        _ = loop_remove_timer(
+        _ = loop.loopRemoveTimer(
             state.eventloop.?,
             seat.repeat_timer.?,
         );
@@ -200,7 +167,7 @@ fn keyboardKey(
     if (key_state_raw == pressed and seat.repeat_period_ms > 0) {
         seat.repeat_sym = sym;
         seat.repeat_codepoint = codepoint;
-        seat.repeat_timer = loop_add_timer(
+        seat.repeat_timer = loop.loopAddTimer(
             state.eventloop.?,
             seat.repeat_delay_ms,
             keyboardRepeat,

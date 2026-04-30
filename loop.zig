@@ -16,9 +16,7 @@ const wl = types.c;
 // Log verbosity shorthands.
 const log_err: i32 = @intFromEnum(types.LogImportance.err);
 
-// Log functions via C ABI (defined in log.zig).
-extern fn _swaylock_log(verbosity: i32, fmt: [*c]const u8, ...) void;
-extern fn _swaylock_strip_path(filepath: [*c]const u8) [*c]const u8;
+const log = @import("log");
 
 const alloc = std.heap.c_allocator;
 
@@ -36,34 +34,15 @@ inline fn wlEntry(
     return @ptrFromInt(@intFromPtr(node) - @offsetOf(T, field));
 }
 
-/// Logs a formatted message via swaylock's log system with source
-/// location prepended.
-fn slog(
-    verbosity: i32,
-    src: std.builtin.SourceLocation,
-    comptime fmt: []const u8,
-    args: anytype,
-) void {
-    var buf: [256]u8 = undefined;
-    const msg = std.fmt.bufPrintZ(&buf, fmt, args) catch return;
-    _swaylock_log(
-        verbosity,
-        "[%s:%d] %s",
-        _swaylock_strip_path(src.file.ptr),
-        @as(c_int, @intCast(src.line)),
-        msg.ptr,
-    );
-}
-
 /// Creates a new event loop.
-pub export fn loop_create() callconv(.c) ?*types.Loop {
+pub fn loopCreate() ?*types.Loop {
     const loop = alloc.create(types.Loop) catch {
-        slog(log_err, @src(), "Unable to allocate memory for loop", .{});
+        log.slog(log_err, @src(), "Unable to allocate memory for loop", .{});
         return null;
     };
     const fds = alloc.alloc(wl.struct_pollfd, 10) catch {
         alloc.destroy(loop);
-        slog(log_err, @src(), "Unable to allocate memory for loop", .{});
+        log.slog(log_err, @src(), "Unable to allocate memory for loop", .{});
         return null;
     };
     loop.* = .{
@@ -79,7 +58,7 @@ pub export fn loop_create() callconv(.c) ?*types.Loop {
 }
 
 /// Destroys the event loop, freeing all resources.
-pub export fn loop_destroy(loop: *types.Loop) callconv(.c) void {
+pub fn loopDestroy(loop: *types.Loop) void {
     var node = wlPtr(loop.fd_events.next);
     while (node != &loop.fd_events) {
         const next = wlPtr(node.next);
@@ -102,7 +81,7 @@ pub export fn loop_destroy(loop: *types.Loop) callconv(.c) void {
 
 /// Polls the event loop once, dispatching ready fds and expired
 /// timers. Blocks until at least one event is ready or a timer fires.
-pub export fn loop_poll(loop: *types.Loop) callconv(.c) void {
+pub fn loopPoll(loop: *types.Loop) void {
     var ms: i32 = std.math.maxInt(i32);
     if (wl.wl_list_empty(&loop.timers) == 0) {
         var now: wl.struct_timespec = undefined;
@@ -131,7 +110,7 @@ pub export fn loop_poll(loop: *types.Loop) callconv(.c) void {
         ms,
     );
     if (ret < 0 and wl.__errno_location().* != wl.EINTR) {
-        slog(
+        log.slog(
             log_err,
             @src(),
             "poll failed: {s}",
@@ -183,15 +162,15 @@ pub export fn loop_poll(loop: *types.Loop) callconv(.c) void {
 }
 
 /// Adds a file descriptor to the event loop.
-pub export fn loop_add_fd(
+pub fn loopAddFd(
     loop: *types.Loop,
     fd: i32,
     mask: i16,
     callback: types.FdCallback,
     data: ?*anyopaque,
-) callconv(.c) void {
+) void {
     const event = alloc.create(types.FdEvent) catch {
-        slog(log_err, @src(), "Unable to allocate memory for event", .{});
+        log.slog(log_err, @src(), "Unable to allocate memory for event", .{});
         return;
     };
     event.* = .{
@@ -208,7 +187,7 @@ pub export fn loop_add_fd(
             loop.fds[0..old_cap],
             new_cap,
         ) catch {
-            slog(log_err, @src(), "Unable to reallocate fd array", .{});
+            log.slog(log_err, @src(), "Unable to reallocate fd array", .{});
             return;
         };
         loop.fds = new_fds.ptr;
@@ -224,14 +203,14 @@ pub export fn loop_add_fd(
 
 /// Adds a one-shot timer that fires after ms milliseconds.
 /// Returns null on allocation failure.
-pub export fn loop_add_timer(
+pub fn loopAddTimer(
     loop: *types.Loop,
     ms: i32,
     callback: types.TimerCallback,
     data: ?*anyopaque,
-) callconv(.c) ?*types.LoopTimer {
+) ?*types.LoopTimer {
     const timer = alloc.create(types.LoopTimer) catch {
-        slog(log_err, @src(), "Unable to allocate memory for timer", .{});
+        log.slog(log_err, @src(), "Unable to allocate memory for timer", .{});
         return null;
     };
     timer.* = .{
@@ -255,10 +234,10 @@ pub export fn loop_add_timer(
 
 /// Removes a file descriptor from the event loop.
 /// Returns true if the fd was found and removed.
-pub export fn loop_remove_fd(
+pub fn loopRemoveFd(
     loop: *types.Loop,
     fd: i32,
-) callconv(.c) bool {
+) bool {
     var fd_index: usize = 0;
     var node = wlPtr(loop.fd_events.next);
     while (node != &loop.fd_events) {
@@ -283,11 +262,11 @@ pub export fn loop_remove_fd(
 }
 
 /// Marks a timer for deferred removal. The memory is freed on the
-/// next loop_poll call.
-pub export fn loop_remove_timer(
+/// next loopPoll call.
+pub fn loopRemoveTimer(
     loop: *types.Loop,
     remove: *types.LoopTimer,
-) callconv(.c) bool {
+) bool {
     var tnode = wlPtr(loop.timers.next);
     while (tnode != &loop.timers) {
         const timer = wlEntry(types.LoopTimer, "link", tnode);

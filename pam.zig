@@ -9,18 +9,11 @@ const log_err: i32 = @intFromEnum(types.LogImportance.err);
 const log_info: i32 = @intFromEnum(types.LogImportance.info);
 const log_debug: i32 = @intFromEnum(types.LogImportance.debug);
 
-extern fn _swaylock_log(verbosity: i32, fmt: [*c]const u8, ...) void;
-extern fn _swaylock_strip_path(filepath: [*c]const u8) [*c]const u8;
-extern fn comm_child_read(payload: *?[*]u8, len: *usize) i32;
-extern fn comm_child_write(
-    msg_type: u8,
-    payload: ?[*]const u8,
-    len: usize,
-) bool;
+const log = @import("log");
+const comm = @import("comm");
 extern fn password_buffer_create(size: usize) ?[*]u8;
 extern fn password_buffer_destroy(buffer: ?[*]u8, size: usize) void;
 extern fn clear_buffer(buf: ?[*]u8, size: usize) void;
-extern fn spawn_comm_child() bool;
 
 const c = @cImport({
     @cDefine("_POSIX_C_SOURCE", "200809L");
@@ -33,9 +26,6 @@ const c = @cImport({
     @cInclude("unistd.h");
     @cInclude("gdm/gdm-custom-json-pam-extension.h");
 });
-
-/// Declared in comm.c but not exported via comm.h.
-extern fn get_comm_child_fd() i32;
 
 /// Shims compiled from pam_gdm_shim.c to avoid Zig's C translator
 /// choking on GNU statement-expression macros in the GDM headers.
@@ -54,25 +44,6 @@ fn gdmMessageIsValid(msg: *const c.GdmPamExtensionJSONProtocol) bool {
         0,
     );
     return std.mem.eql(u8, name, "com.ubuntu.authd.gdm");
-}
-
-/// Formats a message and passes it to the swaylock logger, attaching
-/// the source location captured at the call site via @src().
-fn slog(
-    verbosity: anytype,
-    src: std.builtin.SourceLocation,
-    comptime fmt: []const u8,
-    args: anytype,
-) void {
-    var buf: [512]u8 = undefined;
-    const msg = std.fmt.bufPrintZ(&buf, fmt, args) catch return;
-    _swaylock_log(
-        verbosity,
-        "[%s:%d] %s",
-        _swaylock_strip_path(src.file.ptr),
-        @as(c_int, @intCast(src.line)),
-        msg.ptr,
-    );
 }
 
 // jsonStringifyAllocBytes serialises v to JSON, returning an
@@ -173,7 +144,7 @@ const ConvState = struct {
 
 /// Send a byte slice over the IPC channel then free it.
 fn commSend(msg_type: u8, bytes: []u8) void {
-    _ = comm_child_write(msg_type, bytes.ptr, bytes.len);
+    _ = comm.commChildWrite(msg_type, bytes.ptr, bytes.len);
     std.heap.c_allocator.free(bytes);
 }
 
@@ -302,7 +273,7 @@ fn handleGdmJson(
         input,
         .{},
     ) catch {
-        slog(
+        log.slog(
             log_err,
             @src(),
             "cJSON_Parse failed: {s}",
@@ -320,7 +291,7 @@ fn handleGdmJson(
         .string => |s| s,
         else => return null,
     };
-    slog(log_debug, @src(), "handle_gdm_json: type={s}", .{tp});
+    log.slog(log_debug, @src(), "handle_gdm_json: type={s}", .{tp});
 
     if (std.mem.eql(u8, tp, "hello")) {
         return jsonStringifyC(GdmResponse{ .hello = .{} });
@@ -350,7 +321,7 @@ fn handleGdmJson(
             .string => |s| s,
             else => "",
         };
-        slog(
+        log.slog(
             log_debug,
             @src(),
             "handle_gdm_json: event type={s}",
@@ -448,13 +419,13 @@ fn handleGdmJson(
                     );
                 // "userSelection" → AUTHD_STAGE_NONE (default)
             }
-            _ = comm_child_write(
+            _ = comm.commChildWrite(
                 types.CommMsg.stage,
                 @ptrCast(&stage_byte),
                 @sizeOf(u8),
             );
         } else if (std.mem.eql(u8, etype, "startAuthentication")) {
-            slog(
+            log.slog(
                 log_debug,
                 @src(),
                 "handle_gdm_json: startAuthentication" ++
@@ -464,7 +435,7 @@ fn handleGdmJson(
             const stage_byte: u8 = @intCast(
                 @intFromEnum(types.AuthdStage.challenge),
             );
-            _ = comm_child_write(
+            _ = comm.commChildWrite(
                 types.CommMsg.stage,
                 @ptrCast(&stage_byte),
                 @sizeOf(u8),
@@ -482,7 +453,7 @@ fn handleGdmJson(
                     },
                     else => "(none)",
                 };
-                slog(
+                log.slog(
                     log_debug,
                     @src(),
                     "handle_gdm_json: authEvent access={s} -> AUTH_EVENT",
@@ -501,7 +472,7 @@ fn handleGdmJson(
             state.pending_count += 1;
             state.user_selected_sent = true;
         }
-        slog(
+        log.slog(
             log_debug,
             @src(),
             "handle_gdm_json: poll pending={d} user_sel_sent={d}",
@@ -510,7 +481,7 @@ fn handleGdmJson(
 
         while (state.pending_count < 64) {
             var pfd = c.struct_pollfd{
-                .fd = get_comm_child_fd(),
+                .fd = comm.getCommChildFd(),
                 .events = c.POLLIN,
                 .revents = 0,
             };
@@ -518,13 +489,13 @@ fn handleGdmJson(
 
             var payload: ?[*]u8 = null;
             var plen: usize = 0;
-            const mtype_raw = comm_child_read(&payload, &plen);
+            const mtype_raw = comm.commChildRead(&payload, &plen);
             if (mtype_raw <= 0) {
                 c.free(@ptrCast(payload));
                 break;
             }
             const mtype: u8 = @intCast(mtype_raw);
-            slog(
+            log.slog(
                 log_debug,
                 @src(),
                 "handle_gdm_json: poll read mtype=0x{x:0>2} plen={d}",
@@ -602,7 +573,7 @@ fn handleGdmJson(
             }
         }
 
-        slog(
+        log.slog(
             log_debug,
             @src(),
             "handle_gdm_json: pollResponse nevents={d}",
@@ -627,13 +598,13 @@ fn handleConversation(
     data: ?*anyopaque,
 ) callconv(.c) c_int {
     const state: *ConvState = @ptrCast(@alignCast(data.?));
-    slog(log_debug, @src(), "handle_conversation: num_msg={d}", .{num_msg});
+    log.slog(log_debug, @src(), "handle_conversation: num_msg={d}", .{num_msg});
 
     const pam_reply: [*c]c.pam_response = @ptrCast(@alignCast(
         c.calloc(@intCast(num_msg), @sizeOf(c.pam_response)),
     ));
     if (pam_reply == null) {
-        slog(log_err, @src(), "allocation failed", .{});
+        log.slog(log_err, @src(), "allocation failed", .{});
         return c.PAM_ABORT;
     }
     resp.* = pam_reply;
@@ -641,7 +612,7 @@ fn handleConversation(
     var i: c_int = 0;
     while (i < num_msg) : (i += 1) {
         const idx: usize = @intCast(i);
-        slog(
+        log.slog(
             log_debug,
             @src(),
             "handle_conversation: msg[{d}] style={d}",
@@ -660,12 +631,12 @@ fn handleConversation(
                 const stage_byte: u8 = @intCast(
                     @intFromEnum(types.AuthdStage.challenge),
                 );
-                _ = comm_child_write(
+                _ = comm.commChildWrite(
                     types.CommMsg.stage,
                     @ptrCast(&stage_byte),
                     @sizeOf(u8),
                 );
-                slog(
+                log.slog(
                     log_debug,
                     @src(),
                     "handle_conversation: PAM_PROMPT" ++
@@ -676,14 +647,14 @@ fn handleConversation(
                 var payload: ?[*]u8 = null;
                 var len: usize = 0;
                 while (true) {
-                    const t_raw = comm_child_read(&payload, &len);
+                    const t_raw = comm.commChildRead(&payload, &len);
                     if (t_raw <= 0) return c.PAM_ABORT;
                     const t: u8 = @intCast(t_raw);
                     if (t == types.CommMsg.password) break;
                     c.free(@ptrCast(payload));
                     payload = null;
                 }
-                slog(
+                log.slog(
                     log_debug,
                     @src(),
                     "handle_conversation: PAM_PROMPT got password (len={d})",
@@ -694,11 +665,11 @@ fn handleConversation(
                 clear_buffer(payload, len);
                 c.free(@ptrCast(payload));
                 if (pam_reply[idx].resp == null) {
-                    slog(log_err, @src(), "allocation failed", .{});
+                    log.slog(log_err, @src(), "allocation failed", .{});
                     return c.PAM_ABORT;
                 }
             },
-            c.PAM_TEXT_INFO => slog(
+            c.PAM_TEXT_INFO => log.slog(
                 log_debug,
                 @src(),
                 "handle_conversation: PAM_TEXT_INFO: {s}",
@@ -707,7 +678,7 @@ fn handleConversation(
                 else
                     "(null)"},
             ),
-            c.PAM_ERROR_MSG => slog(
+            c.PAM_ERROR_MSG => log.slog(
                 log_debug,
                 @src(),
                 "handle_conversation: PAM_ERROR_MSG: {s}",
@@ -743,7 +714,7 @@ fn handleConversation(
                         continue;
                     }
                 }
-                slog(
+                log.slog(
                     log_debug,
                     @src(),
                     "handle_conversation: unknown msg_style={d}",
@@ -752,7 +723,7 @@ fn handleConversation(
             },
         }
     }
-    slog(
+    log.slog(
         log_debug,
         @src(),
         "handle_conversation: returning PAM_SUCCESS",
@@ -765,7 +736,7 @@ fn handleConversation(
 export fn initialize_pw_backend(argc: c_int, argv: [*c][*c]u8) void {
     _ = argc;
     _ = argv;
-    if (!spawn_comm_child()) c.exit(c.EXIT_FAILURE);
+    if (!comm.spawnCommChild()) c.exit(c.EXIT_FAILURE);
 }
 
 /// Run the PAM authentication loop in the child process.  Never returns.
@@ -775,7 +746,7 @@ export fn run_pw_backend_child() void {
 
     const passwd_ptr = c.getpwuid(c.getuid());
     if (passwd_ptr == null) {
-        slog(log_err, @src(), "getpwuid failed", .{});
+        log.slog(log_err, @src(), "getpwuid failed", .{});
         c.exit(c.EXIT_FAILURE);
     }
     const username = passwd_ptr.*.pw_name;
@@ -793,10 +764,10 @@ export fn run_pw_backend_child() void {
         &conv,
         &auth_handle,
     ) != c.PAM_SUCCESS) {
-        slog(log_err, @src(), "pam_start failed", .{});
+        log.slog(log_err, @src(), "pam_start failed", .{});
         c.exit(c.EXIT_FAILURE);
     }
-    slog(
+    log.slog(
         log_debug,
         @src(),
         "Prepared to authorise user {s}",
@@ -807,15 +778,15 @@ export fn run_pw_backend_child() void {
     while (true) {
         pam_status = c.pam_authenticate(auth_handle, 0);
         if (pam_status == c.PAM_SUCCESS) {
-            _ = comm_child_write(types.CommMsg.auth_result, "\x01", 1);
+            _ = comm.commChildWrite(types.CommMsg.auth_result, "\x01", 1);
         } else {
-            slog(
+            log.slog(
                 log_err,
                 @src(),
                 "pam_authenticate failed: {s}",
                 .{std.mem.span(getPamAuthError(pam_status))},
             );
-            _ = comm_child_write(types.CommMsg.auth_result, "\x00", 1);
+            _ = comm.commChildWrite(types.CommMsg.auth_result, "\x00", 1);
         }
         if (pam_status != c.PAM_AUTH_ERR) break;
     }
@@ -823,7 +794,7 @@ export fn run_pw_backend_child() void {
     _ = c.pam_setcred(auth_handle, c.PAM_REFRESH_CRED);
 
     if (c.pam_end(auth_handle, pam_status) != c.PAM_SUCCESS) {
-        slog(log_err, @src(), "pam_end failed", .{});
+        log.slog(log_err, @src(), "pam_end failed", .{});
         c.exit(c.EXIT_FAILURE);
     }
     c.exit(if (pam_status == c.PAM_SUCCESS)

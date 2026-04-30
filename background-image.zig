@@ -9,12 +9,12 @@ const types = @import("types");
 // No local C imports needed — cairo types come from types.c.
 const c = types.c;
 
+const log = @import("log");
+
 const log_err: i32 = @intFromEnum(types.LogImportance.err);
-extern fn _swaylock_log(verbosity: i32, fmt: [*c]const u8, ...) void;
-extern fn _swaylock_strip_path(filepath: [*c]const u8) [*c]const u8;
 
 // Minimal hand-rolled declarations for the gdk-pixbuf/glib symbols
-// needed by load_background_image. Zig 0.16's aro C-frontend cannot
+// needed by loadBackgroundImage. Zig 0.16's aro C-frontend cannot
 // parse the glib pragma-heavy headers, so we avoid @cImporting them
 // and instead declare just what we need here.
 const GdkPixbuf = opaque {};
@@ -31,54 +31,30 @@ extern fn gdk_pixbuf_new_from_file(
 extern fn gdk_pixbuf_apply_embedded_orientation(
     src: ?*GdkPixbuf,
 ) ?*GdkPixbuf;
-extern fn gdk_cairo_image_surface_create_from_pixbuf(
-    pixbuf: ?*const GdkPixbuf,
-) ?*c.cairo_surface_t;
+const cairo_mod = @import("cairo");
 extern fn g_object_unref(object: ?*anyopaque) void;
-
-/// Formats a message and passes it to the swaylock logger,
-/// attaching the source location captured at the call site.
-fn slog(
-    verbosity: i32,
-    src: std.builtin.SourceLocation,
-    comptime fmt: []const u8,
-    args: anytype,
-) void {
-    var buf: [512]u8 = undefined;
-    const msg = std.fmt.bufPrintZ(&buf, fmt, args) catch return;
-    _swaylock_log(
-        verbosity,
-        "[%s:%d] %s",
-        _swaylock_strip_path(src.file.ptr),
-        @as(c_int, @intCast(src.line)),
-        msg.ptr,
-    );
-}
 
 /// Parses a background mode string and returns the corresponding
 /// enum value, or .invalid on an unknown string.
-pub export fn parse_background_mode(
-    mode: [*c]const u8,
-) types.BackgroundMode {
-    const s = std.mem.span(mode);
-    if (std.mem.eql(u8, s, "stretch")) {
+pub fn parseBackgroundMode(mode: []const u8) types.BackgroundMode {
+    if (std.mem.eql(u8, mode, "stretch")) {
         return types.BackgroundMode.stretch;
-    } else if (std.mem.eql(u8, s, "fill")) {
+    } else if (std.mem.eql(u8, mode, "fill")) {
         return types.BackgroundMode.fill;
-    } else if (std.mem.eql(u8, s, "fit")) {
+    } else if (std.mem.eql(u8, mode, "fit")) {
         return types.BackgroundMode.fit;
-    } else if (std.mem.eql(u8, s, "center")) {
+    } else if (std.mem.eql(u8, mode, "center")) {
         return types.BackgroundMode.center;
-    } else if (std.mem.eql(u8, s, "tile")) {
+    } else if (std.mem.eql(u8, mode, "tile")) {
         return types.BackgroundMode.tile;
-    } else if (std.mem.eql(u8, s, "solid_color")) {
+    } else if (std.mem.eql(u8, mode, "solid_color")) {
         return types.BackgroundMode.solid_color;
     }
-    slog(
+    log.slog(
         log_err,
         @src(),
         "Unsupported background mode: {s}",
-        .{s},
+        .{mode},
     );
     return types.BackgroundMode.invalid;
 }
@@ -88,19 +64,19 @@ pub export fn parse_background_mode(
 /// accepted and embedded orientation is applied; otherwise only
 /// PNG images are supported via Cairo directly.
 /// Returns a cairo surface on success, or null on failure.
-pub export fn load_background_image(
-    path: [*c]const u8,
+pub fn loadBackgroundImage(
+    path: [:0]const u8,
 ) ?*c.cairo_surface_t {
     var image: ?*c.cairo_surface_t = null;
     if (comptime opts.have_gdk_pixbuf) {
         var err: ?*GError = null;
-        const pixbuf = gdk_pixbuf_new_from_file(path, &err);
+        const pixbuf = gdk_pixbuf_new_from_file(path.ptr, &err);
         if (pixbuf == null) {
             const msg = if (err) |e|
                 std.mem.sliceTo(e.message, 0)
             else
                 "unknown error";
-            slog(
+            log.slog(
                 log_err,
                 @src(),
                 "Failed to load background image ({s}).",
@@ -112,13 +88,13 @@ pub export fn load_background_image(
         // are not rotated and will be handled efficiently.
         const oriented = gdk_pixbuf_apply_embedded_orientation(pixbuf);
         g_object_unref(pixbuf);
-        image = gdk_cairo_image_surface_create_from_pixbuf(oriented);
+        image = cairo_mod.GdkExports.gdkCairoImageSurfaceCreateFromPixbuf(oriented);
         g_object_unref(oriented);
     } else {
-        image = c.cairo_image_surface_create_from_png(path);
+        image = c.cairo_image_surface_create_from_png(path.ptr);
     }
     if (image == null) {
-        slog(
+        log.slog(
             log_err,
             @src(),
             "Failed to read background image.",
@@ -132,14 +108,14 @@ pub export fn load_background_image(
             0,
         );
         if (comptime opts.have_gdk_pixbuf) {
-            slog(
+            log.slog(
                 log_err,
                 @src(),
                 "Failed to read background image: {s}.",
                 .{status_str},
             );
         } else {
-            slog(
+            log.slog(
                 log_err,
                 @src(),
                 "Failed to read background image: {s}.\n" ++
@@ -158,7 +134,7 @@ pub export fn load_background_image(
 /// fit within buffer_width x buffer_height.
 /// .solid_color and .invalid are not valid here and will trigger
 /// unreachable.
-pub export fn render_background_image(
+pub fn renderBackgroundImage(
     cairo: ?*c.cairo_t,
     image: ?*c.cairo_surface_t,
     mode: types.BackgroundMode,

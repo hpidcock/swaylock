@@ -12,19 +12,9 @@ const qrencode = if (opts.have_qrencode) @cImport({
 }) else struct {};
 
 const log_err: i32 = @intFromEnum(types.LogImportance.err);
-extern fn _swaylock_log(verbosity: i32, fmt: [*c]const u8, ...) void;
-extern fn _swaylock_strip_path(filepath: [*c]const u8) [*c]const u8;
-extern fn cairo_set_source_u32(cairo: ?*wl.cairo_t, color: u32) void;
-extern fn to_cairo_subpixel_order(
-    subpixel: wl.wl_output_subpixel,
-) wl.cairo_subpixel_order_t;
-extern fn render_background_image(
-    cairo: ?*wl.cairo_t,
-    image: ?*wl.cairo_surface_t,
-    mode: types.BackgroundMode,
-    buffer_width: i32,
-    buffer_height: i32,
-) void;
+const log = @import("log");
+const background_image = @import("background_image");
+const cairo_mod = @import("cairo");
 extern fn get_next_buffer(
     shm: ?*wl.wl_shm,
     pool: [*]types.PoolBuffer,
@@ -39,7 +29,6 @@ extern fn create_buffer(
     format: u32,
 ) ?*types.PoolBuffer;
 extern fn destroy_buffer(buffer: *types.PoolBuffer) void;
-extern fn swaylock_log_get_overlay(count_out: *i32) ?[*][220]u8;
 
 const pi: f64 = math.pi;
 /// Angular range of the typing indicator arc.
@@ -58,15 +47,15 @@ fn set_color_for_state(
     colorset: *types.SwaylockColorSet,
 ) void {
     if (state.input_state == types.InputState.clear) {
-        cairo_set_source_u32(cairo, colorset.cleared);
+        cairo_mod.cairoSetSourceU32(cairo, colorset.cleared);
     } else if (state.auth_state == types.AuthState.validating) {
-        cairo_set_source_u32(cairo, colorset.verifying);
+        cairo_mod.cairoSetSourceU32(cairo, colorset.verifying);
     } else if (state.auth_state == types.AuthState.invalid) {
-        cairo_set_source_u32(cairo, colorset.wrong);
+        cairo_mod.cairoSetSourceU32(cairo, colorset.wrong);
     } else if (state.xkb.caps_lock and
         state.args.show_caps_lock_indicator)
     {
-        cairo_set_source_u32(cairo, colorset.caps_lock);
+        cairo_mod.cairoSetSourceU32(cairo, colorset.caps_lock);
     } else if (state.xkb.caps_lock and
         !state.args.show_caps_lock_indicator and
         state.args.show_caps_lock_text)
@@ -74,10 +63,10 @@ fn set_color_for_state(
         const saved = state.args.colors.text.input;
         state.args.colors.text.input =
             state.args.colors.text.caps_lock;
-        cairo_set_source_u32(cairo, colorset.input);
+        cairo_mod.cairoSetSourceU32(cairo, colorset.input);
         state.args.colors.text.input = saved;
     } else {
-        cairo_set_source_u32(cairo, colorset.input);
+        cairo_mod.cairoSetSourceU32(cairo, colorset.input);
     }
 }
 
@@ -107,7 +96,7 @@ fn render_debug_overlay(surface: *types.SwaylockSurface) void {
         if (surface.width == 0 or surface.height == 0) return;
 
         var count: i32 = 0;
-        const lines = swaylock_log_get_overlay(&count);
+        const lines = log.getOverlay(&count);
         if (count == 0) return;
 
         const font_size: f64 = fd(surface.scale) * 12.0;
@@ -215,10 +204,9 @@ export fn render(surface: *types.SwaylockSurface) void {
             bh,
             wl.WL_SHM_FORMAT_ARGB8888,
         ) == null) {
-            _swaylock_log(
+            log.swayLog(
                 log_err,
-                "Failed to create new buffer for " ++
-                    "frame background.",
+                "Failed to create new buffer for frame background.",
             );
             return;
         }
@@ -227,13 +215,13 @@ export fn render(surface: *types.SwaylockSurface) void {
         wl.cairo_set_antialias(cr, wl.CAIRO_ANTIALIAS_BEST);
         wl.cairo_save(cr);
         wl.cairo_set_operator(cr, wl.CAIRO_OPERATOR_SOURCE);
-        cairo_set_source_u32(cr, state.args.colors.background);
+        cairo_mod.cairoSetSourceU32(cr, state.args.colors.background);
         wl.cairo_paint(cr);
         if (surface.image != null and
             state.args.mode != types.BackgroundMode.solid_color)
         {
             wl.cairo_set_operator(cr, wl.CAIRO_OPERATOR_OVER);
-            render_background_image(
+            background_image.renderBackgroundImage(
                 cr,
                 surface.image,
                 state.args.mode,
@@ -287,7 +275,7 @@ fn configure_font_drawing(
     wl.cairo_font_options_set_antialias(fo, wl.CAIRO_ANTIALIAS_SUBPIXEL);
     wl.cairo_font_options_set_subpixel_order(
         fo,
-        to_cairo_subpixel_order(subpixel),
+        cairo_mod.toCairoSubpixelOrder(subpixel),
     );
     wl.cairo_set_font_options(cairo, fo);
     wl.cairo_select_font_face(
@@ -399,7 +387,7 @@ fn render_frame(surface: *types.SwaylockSurface) bool {
             @intCast(buf_h),
         );
         if (buf_ptr == null) {
-            _swaylock_log(log_err, "No buffer");
+            log.swayLog(log_err, "No buffer");
             return false;
         }
         const buf: *types.PoolBuffer = buf_ptr.?;
@@ -433,12 +421,15 @@ fn render_frame(surface: *types.SwaylockSurface) bool {
 
             wl.cairo_rectangle(cr, 0, iy, fd(buf_w), item_height);
             if (idx == sel) {
-                cairo_set_source_u32(
+                cairo_mod.cairoSetSourceU32(
                     cr,
                     state.args.colors.layout_background,
                 );
             } else {
-                cairo_set_source_u32(cr, state.args.colors.background);
+                cairo_mod.cairoSetSourceU32(
+                    cr,
+                    state.args.colors.background,
+                );
             }
             wl.cairo_fill(cr);
 
@@ -450,9 +441,15 @@ fn render_frame(surface: *types.SwaylockSurface) bool {
                 fe.descent;
             wl.cairo_move_to(cr, tx, ty);
             if (idx == sel) {
-                cairo_set_source_u32(cr, state.args.colors.layout_text);
+                cairo_mod.cairoSetSourceU32(
+                    cr,
+                    state.args.colors.layout_text,
+                );
             } else {
-                cairo_set_source_u32(cr, state.args.colors.text.input);
+                cairo_mod.cairoSetSourceU32(
+                    cr,
+                    state.args.colors.text.input,
+                );
             }
             wl.cairo_show_text(cr, safe_name);
         }
@@ -800,7 +797,7 @@ fn render_frame(surface: *types.SwaylockSurface) bool {
         @intCast(buffer_height),
     );
     if (buf_ptr == null) {
-        _swaylock_log(log_err, "No buffer");
+        log.swayLog(log_err, "No buffer");
         return false;
     }
     const buf: *types.PoolBuffer = buf_ptr.?;
@@ -894,7 +891,10 @@ fn render_frame(surface: *types.SwaylockSurface) bool {
                 qr_y = fd(buffer_height) - error_h;
             }
             wl.cairo_move_to(cairo, tx, ty);
-            cairo_set_source_u32(cairo, state.args.colors.layout_text);
+            cairo_mod.cairoSetSourceU32(
+                cairo,
+                state.args.colors.layout_text,
+            );
             wl.cairo_show_text(cairo, @ptrCast(state.authd_layout.qr_code));
         }
 
@@ -909,7 +909,7 @@ fn render_frame(surface: *types.SwaylockSurface) bool {
                 (fe.height - fe.descent) +
                 box_padding / 2.0;
             wl.cairo_move_to(cairo, tx, ty);
-            cairo_set_source_u32(cairo, error_text_color);
+            cairo_mod.cairoSetSourceU32(cairo, error_text_color);
             wl.cairo_show_text(cairo, @ptrCast(state.authd_error));
         }
     } else if (draw_indicator) {
@@ -935,19 +935,22 @@ fn render_frame(surface: *types.SwaylockSurface) bool {
                 ext.width + 2.0 * box_padding,
                 fe.height + 2.0 * box_padding,
             );
-            cairo_set_source_u32(
+            cairo_mod.cairoSetSourceU32(
                 cairo,
                 state.args.colors.layout_background,
             );
             wl.cairo_fill_preserve(cairo);
-            cairo_set_source_u32(cairo, state.args.colors.layout_border);
+            cairo_mod.cairoSetSourceU32(
+                cairo,
+                state.args.colors.layout_border,
+            );
             wl.cairo_stroke(cairo);
             wl.cairo_move_to(
                 cairo,
                 bx - ext.x_bearing + box_padding,
                 (fe.height - fe.descent) + box_padding,
             );
-            cairo_set_source_u32(cairo, state.args.colors.layout_text);
+            cairo_mod.cairoSetSourceU32(cairo, state.args.colors.layout_text);
             wl.cairo_show_text(cairo, @ptrCast(state.authd_layout.label));
             wl.cairo_new_sub_path(cairo);
         }
@@ -1024,12 +1027,12 @@ fn render_frame(surface: *types.SwaylockSurface) bool {
                 if (state.xkb.caps_lock and
                     state.args.show_caps_lock_indicator)
                 {
-                    cairo_set_source_u32(
+                    cairo_mod.cairoSetSourceU32(
                         cairo,
                         state.args.colors.caps_lock_key_highlight,
                     );
                 } else {
-                    cairo_set_source_u32(
+                    cairo_mod.cairoSetSourceU32(
                         cairo,
                         state.args.colors.key_highlight,
                     );
@@ -1038,12 +1041,12 @@ fn render_frame(surface: *types.SwaylockSurface) bool {
                 if (state.xkb.caps_lock and
                     state.args.show_caps_lock_indicator)
                 {
-                    cairo_set_source_u32(
+                    cairo_mod.cairoSetSourceU32(
                         cairo,
                         state.args.colors.caps_lock_bs_highlight,
                     );
                 } else {
-                    cairo_set_source_u32(
+                    cairo_mod.cairoSetSourceU32(
                         cairo,
                         state.args.colors.bs_highlight,
                     );
@@ -1061,7 +1064,7 @@ fn render_frame(surface: *types.SwaylockSurface) bool {
             const hs_end: f64 = hs + type_indicator_range;
 
             wl.cairo_set_line_width(cairo, 2.0 * fd(scale));
-            cairo_set_source_u32(cairo, state.args.colors.separator);
+            cairo_mod.cairoSetSourceU32(cairo, state.args.colors.separator);
             wl.cairo_move_to(
                 cairo,
                 cx + math.cos(hs) * inner_radius,
@@ -1131,12 +1134,12 @@ fn render_frame(surface: *types.SwaylockSurface) bool {
                 ext.width + 2.0 * box_padding,
                 fe.height + 2.0 * box_padding,
             );
-            cairo_set_source_u32(
+            cairo_mod.cairoSetSourceU32(
                 cairo,
                 state.args.colors.layout_background,
             );
             wl.cairo_fill_preserve(cairo);
-            cairo_set_source_u32(cairo, state.args.colors.layout_border);
+            cairo_mod.cairoSetSourceU32(cairo, state.args.colors.layout_border);
             wl.cairo_stroke(cairo);
             wl.cairo_move_to(
                 cairo,
@@ -1144,7 +1147,7 @@ fn render_frame(surface: *types.SwaylockSurface) bool {
                 lby + (fe.height - fe.descent) +
                     box_padding,
             );
-            cairo_set_source_u32(cairo, state.args.colors.layout_text);
+            cairo_mod.cairoSetSourceU32(cairo, state.args.colors.layout_text);
             wl.cairo_show_text(cairo, layout_text);
             wl.cairo_new_sub_path(cairo);
         }
@@ -1214,13 +1217,13 @@ fn render_frame(surface: *types.SwaylockSurface) bool {
                 );
                 wl.cairo_close_path(cairo);
 
-                cairo_set_source_u32(
+                cairo_mod.cairoSetSourceU32(
                     cairo,
                     state.args.colors.layout_background,
                 );
                 wl.cairo_fill_preserve(cairo);
                 wl.cairo_set_line_width(cairo, 2.0 * fd(scale));
-                cairo_set_source_u32(
+                cairo_mod.cairoSetSourceU32(
                     cairo,
                     state.args.colors.layout_border,
                 );
@@ -1232,7 +1235,7 @@ fn render_frame(surface: *types.SwaylockSurface) bool {
                     y + (fe.height - fe.descent) +
                         box_padding,
                 );
-                cairo_set_source_u32(
+                cairo_mod.cairoSetSourceU32(
                     cairo,
                     state.args.colors.layout_text,
                 );
@@ -1252,7 +1255,7 @@ fn render_frame(surface: *types.SwaylockSurface) bool {
                     (fe.height - fe.descent) +
                     box_padding / 2.0;
                 wl.cairo_move_to(cairo, tx, ty);
-                cairo_set_source_u32(cairo, error_text_color);
+                cairo_mod.cairoSetSourceU32(cairo, error_text_color);
                 wl.cairo_show_text(cairo, @ptrCast(state.authd_error));
                 wl.cairo_new_sub_path(cairo);
             }
