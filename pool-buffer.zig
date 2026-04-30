@@ -22,8 +22,8 @@ extern fn __errno_location() *c_int;
 /// Opens an anonymous POSIX shared-memory object by trying
 /// time-stamped names until one does not already exist.
 /// Returns a file descriptor on success, or -1 on failure.
-fn anonymous_shm_open() c_int {
-    var retries: c_int = 100;
+fn anonymous_shm_open() i32 {
+    var retries: i32 = 100;
     while (retries > 0) : (retries -= 1) {
         var ts: wl.struct_timespec = undefined;
         _ = wl.clock_gettime(wl.CLOCK_MONOTONIC, &ts);

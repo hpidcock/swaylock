@@ -74,8 +74,8 @@ pub const LogImportance = enum(c_int) {
 
 /// Callback fired when a registered fd becomes ready.
 pub const FdCallback = *const fn (
-    fd: c_int,
-    mask: c_short,
+    fd: i32,
+    mask: i16,
     data: ?*anyopaque,
 ) callconv(.c) void;
 
@@ -104,8 +104,8 @@ pub const LoopTimer = struct {
 /// two intrusive wl_lists: one for fd events and one for timers.
 pub const Loop = struct {
     fds: [*]c.struct_pollfd,
-    fd_length: c_int,
-    fd_capacity: c_int,
+    fd_length: i32,
+    fd_capacity: i32,
     fd_events: c.wl_list,
     timers: c.wl_list,
 };
@@ -207,7 +207,7 @@ pub const SwaylockColors = struct {
 pub const SwaylockArgs = struct {
     colors: SwaylockColors,
     mode: BackgroundMode,
-    font: [*c]u8,
+    font: ?[*:0]u8,
     font_size: u32,
     radius: u32,
     thickness: u32,
@@ -224,7 +224,7 @@ pub const SwaylockArgs = struct {
     hide_keyboard_layout: bool,
     show_failed_attempts: bool,
     daemonize: bool,
-    ready_fd: c_int,
+    ready_fd: i32,
     indicator_idle_visible: bool,
 };
 
@@ -232,35 +232,35 @@ pub const SwaylockArgs = struct {
 pub const SwaylockPassword = struct {
     len: usize,
     buffer_len: usize,
-    buffer: [*c]u8,
+    buffer: ?[*]u8,
 };
 
 // ── Authd types ───────────────────────────────────────────────────
 
 /// An authd authentication broker (id + display name).
 pub const AuthdBroker = extern struct {
-    id: [*c]u8,
-    name: [*c]u8,
+    id: ?[*:0]u8,
+    name: ?[*:0]u8,
 };
 
 /// An authd authentication mode (id + display label).
 pub const AuthdAuthMode = extern struct {
-    id: [*c]u8,
-    label: [*c]u8,
+    id: ?[*:0]u8,
+    label: ?[*:0]u8,
 };
 
 /// UI layout descriptor sent by the authd broker.
 pub const AuthdUiLayout = extern struct {
-    type: [*c]u8,
-    label: [*c]u8,
-    button: [*c]u8,
+    type: ?[*:0]u8,
+    label: ?[*:0]u8,
+    button: ?[*:0]u8,
     /// Entry field hint: "chars", "chars_password", "digits", etc.
-    entry: [*c]u8,
+    entry: ?[*:0]u8,
     wait: bool,
     /// Raw content to encode into a QR image.
-    qr_content: [*c]u8,
+    qr_content: ?[*:0]u8,
     /// Human-readable fallback for the QR code.
-    qr_code: [*c]u8,
+    qr_code: ?[*:0]u8,
 };
 
 // ── Global state ──────────────────────────────────────────────────
@@ -289,7 +289,7 @@ pub const SwaylockState = struct {
     input_state: InputState,
     /// Highlight arc start position; 2048 = one full revolution.
     highlight_start: u32,
-    failed_attempts: c_int,
+    failed_attempts: i32,
     run_display: bool,
     locked: bool,
     lock_failed: bool,
@@ -299,16 +299,16 @@ pub const SwaylockState = struct {
     authd_active: bool,
     authd_stage: AuthdStage,
     authd_brokers: ?[*]AuthdBroker,
-    authd_num_brokers: c_int,
+    authd_num_brokers: i32,
     /// Index of the selected broker; -1 = nothing selected yet.
-    authd_sel_broker: c_int,
+    authd_sel_broker: i32,
     authd_auth_modes: ?[*]AuthdAuthMode,
-    authd_num_auth_modes: c_int,
+    authd_num_auth_modes: i32,
     /// Index of the selected auth mode; -1 = nothing selected yet.
-    authd_sel_auth_mode: c_int,
+    authd_sel_auth_mode: i32,
     authd_layout: AuthdUiLayout,
     /// Optional error / info message from the broker.
-    authd_error: [*c]u8,
+    authd_error: ?[*:0]u8,
 };
 
 /// Per-output lock surface.
@@ -336,19 +336,19 @@ pub const SwaylockSurface = struct {
     height: u32,
     scale: i32,
     subpixel: c.wl_output_subpixel,
-    output_name: [*c]u8,
+    output_name: ?[*:0]u8,
     /// Intrusive wl_list node linked into SwaylockState.surfaces.
     link: c.wl_list,
     frame: ?*c.wl_callback,
     /// Size of the last wl_buffer committed to the background.
-    last_buffer_width: c_int,
-    last_buffer_height: c_int,
+    last_buffer_width: i32,
+    last_buffer_height: i32,
 };
 
 /// One background image (one per -i argument).
 pub const SwaylockImage = struct {
-    path: [*c]u8,
-    output_name: [*c]u8,
+    path: ?[*:0]u8,
+    output_name: ?[*:0]u8,
     cairo_surface: ?*c.cairo_surface_t,
     /// Intrusive wl_list node linked into SwaylockState.images.
     link: c.wl_list,

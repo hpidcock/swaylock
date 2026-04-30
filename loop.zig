@@ -14,10 +14,10 @@ const c = @cImport({
 const wl = types.c;
 
 // Log verbosity shorthands.
-const log_err: c_int = @intFromEnum(types.LogImportance.err);
+const log_err: i32 = @intFromEnum(types.LogImportance.err);
 
 // Log functions via C ABI (defined in log.zig).
-extern fn _swaylock_log(verbosity: c_int, fmt: [*c]const u8, ...) void;
+extern fn _swaylock_log(verbosity: i32, fmt: [*c]const u8, ...) void;
 extern fn _swaylock_strip_path(filepath: [*c]const u8) [*c]const u8;
 
 const alloc = std.heap.c_allocator;
@@ -39,7 +39,7 @@ inline fn wlEntry(
 /// Logs a formatted message via swaylock's log system with source
 /// location prepended.
 fn slog(
-    verbosity: c_int,
+    verbosity: i32,
     src: std.builtin.SourceLocation,
     comptime fmt: []const u8,
     args: anytype,
@@ -103,7 +103,7 @@ pub export fn loop_destroy(loop: *types.Loop) callconv(.c) void {
 /// Polls the event loop once, dispatching ready fds and expired
 /// timers. Blocks until at least one event is ready or a timer fires.
 pub export fn loop_poll(loop: *types.Loop) callconv(.c) void {
-    var ms: c_int = std.math.maxInt(c_int);
+    var ms: i32 = std.math.maxInt(i32);
     if (wl.wl_list_empty(&loop.timers) == 0) {
         var now: wl.struct_timespec = undefined;
         _ = wl.clock_gettime(wl.CLOCK_MONOTONIC, &now);
@@ -116,8 +116,8 @@ pub export fn loop_poll(loop: *types.Loop) callconv(.c) void {
                 @as(i64, timer.expiry.tv_nsec) - @as(i64, now.tv_nsec);
             const full: i64 =
                 sec_diff * 1000 + @divTrunc(nsec_diff, 1_000_000);
-            const timer_ms: c_int = @intCast(
-                @min(full, @as(i64, std.math.maxInt(c_int))),
+            const timer_ms: i32 = @intCast(
+                @min(full, @as(i64, std.math.maxInt(i32))),
             );
             if (timer_ms < ms) ms = timer_ms;
             tnode = wlPtr(tnode.next);
@@ -146,8 +146,8 @@ pub export fn loop_poll(loop: *types.Loop) callconv(.c) void {
     while (fnode != &loop.fd_events) {
         const event = wlEntry(types.FdEvent, "link", fnode);
         const pfd = loop.fds[fd_index];
-        const events: c_short =
-            pfd.events | @as(c_short, wl.POLLHUP | wl.POLLERR);
+        const events: i16 =
+            pfd.events | @as(i16, wl.POLLHUP | wl.POLLERR);
         if (pfd.revents & events != 0)
             event.callback(pfd.fd, pfd.revents, event.data);
         fd_index += 1;
@@ -185,8 +185,8 @@ pub export fn loop_poll(loop: *types.Loop) callconv(.c) void {
 /// Adds a file descriptor to the event loop.
 pub export fn loop_add_fd(
     loop: *types.Loop,
-    fd: c_int,
-    mask: c_short,
+    fd: i32,
+    mask: i16,
     callback: types.FdCallback,
     data: ?*anyopaque,
 ) callconv(.c) void {
@@ -226,7 +226,7 @@ pub export fn loop_add_fd(
 /// Returns null on allocation failure.
 pub export fn loop_add_timer(
     loop: *types.Loop,
-    ms: c_int,
+    ms: i32,
     callback: types.TimerCallback,
     data: ?*anyopaque,
 ) callconv(.c) ?*types.LoopTimer {
@@ -257,7 +257,7 @@ pub export fn loop_add_timer(
 /// Returns true if the fd was found and removed.
 pub export fn loop_remove_fd(
     loop: *types.Loop,
-    fd: c_int,
+    fd: i32,
 ) callconv(.c) bool {
     var fd_index: usize = 0;
     var node = wlPtr(loop.fd_events.next);

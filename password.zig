@@ -15,22 +15,22 @@ const c = @cImport({
 
 const wl = types.c;
 
-const log_err: c_int = @intFromEnum(types.LogImportance.err);
-const log_debug: c_int = @intFromEnum(types.LogImportance.debug);
+const log_err: i32 = @intFromEnum(types.LogImportance.err);
+const log_debug: i32 = @intFromEnum(types.LogImportance.debug);
 
-extern fn _swaylock_log(verbosity: c_int, fmt: [*c]const u8, ...) void;
+extern fn _swaylock_log(verbosity: i32, fmt: [*c]const u8, ...) void;
 extern fn _swaylock_strip_path(
     filepath: [*c]const u8,
 ) [*c]const u8;
 extern fn comm_main_write(
     msg_type: u8,
-    payload: [*c]const u8,
+    payload: ?[*]const u8,
     len: usize,
 ) bool;
 extern fn write_comm_password(pw: *types.SwaylockPassword) bool;
 extern fn loop_add_timer(
     loop: *types.Loop,
-    ms: c_int,
+    ms: i32,
     callback: types.TimerCallback,
     data: ?*anyopaque,
 ) ?*types.LoopTimer;
@@ -39,15 +39,14 @@ extern fn loop_remove_timer(
     timer: *types.LoopTimer,
 ) bool;
 extern fn damage_state(state: *types.SwaylockState) void;
-extern fn utf8_last_size(str: [*c]const u8) c_int;
+extern fn utf8_last_size(str: [*c]const u8) i32;
 extern fn utf8_chsize(ch: u32) usize;
 extern fn utf8_encode(str: [*c]u8, ch: u32) usize;
-extern fn strlen(s: [*c]const u8) usize;
 
 // ── logging helpers ──────────────────────────────────────────────────
 
 fn slog(
-    verbosity: c_int,
+    verbosity: i32,
     src: std.builtin.SourceLocation,
     comptime fmt: []const u8,
     args: anytype,
@@ -64,7 +63,7 @@ fn slog(
 }
 
 fn slogErrno(
-    verbosity: c_int,
+    verbosity: i32,
     src: std.builtin.SourceLocation,
     comptime fmt: []const u8,
 ) void {
@@ -90,7 +89,7 @@ var mlock_supported: bool = true;
 
 /// Expects addr to be page-aligned.
 fn passwordBufferLock(addr: [*]u8, size: usize) bool {
-    var retries: c_int = 5;
+    var retries: i32 = 5;
     while (c.mlock(@ptrCast(addr), size) != 0 and retries > 0) {
         const err = std.c._errno().*;
         if (err == @intFromEnum(std.posix.E.AGAIN)) {
@@ -139,7 +138,7 @@ fn passwordBufferUnlock(addr: [*]u8, size: usize) bool {
     return true;
 }
 
-export fn password_buffer_create(size: usize) [*c]u8 {
+export fn password_buffer_create(size: usize) ?[*]u8 {
     var buffer: ?*anyopaque = null;
     // posix_memalign requires page-size alignment; use sysconf to
     // retrieve the runtime page size portably.
@@ -167,18 +166,18 @@ export fn password_buffer_create(size: usize) [*c]u8 {
     return buf;
 }
 
-export fn password_buffer_destroy(buffer: [*c]u8, size: usize) void {
+export fn password_buffer_destroy(buffer: ?[*]u8, size: usize) void {
     clear_buffer(buffer, size);
-    _ = passwordBufferUnlock(buffer, size);
-    c.free(buffer);
+    _ = passwordBufferUnlock(buffer.?, size);
+    c.free(@ptrCast(buffer));
 }
 
 // ── buffer helpers ───────────────────────────────────────────────────
 
 /// Clears a buffer using volatile writes so the compiler cannot
 /// optimise the zeroing away.
-export fn clear_buffer(buf: [*c]u8, size: usize) void {
-    const vbuf: [*]volatile u8 = @ptrCast(buf);
+export fn clear_buffer(buf: ?[*]u8, size: usize) void {
+    const vbuf: [*]volatile u8 = @ptrCast(buf.?);
     for (0..size) |i|
         vbuf[i] = 0;
 }
@@ -190,9 +189,9 @@ export fn clear_password_buffer(pw: *types.SwaylockPassword) void {
 
 fn backspace(pw: *types.SwaylockPassword) bool {
     if (pw.len != 0) {
-        const last: usize = @intCast(utf8_last_size(pw.buffer));
-        pw.len -= last;
-        pw.buffer[pw.len] = 0;
+        const last: i32 = utf8_last_size(@ptrCast(pw.buffer));
+        pw.len -= @intCast(last);
+        pw.buffer.?[@intCast(pw.len)] = 0;
         return true;
     }
     return false;
@@ -200,11 +199,12 @@ fn backspace(pw: *types.SwaylockPassword) bool {
 
 fn appendCh(pw: *types.SwaylockPassword, codepoint: u32) void {
     const utf8_size: usize = utf8_chsize(codepoint);
-    if (pw.len + utf8_size + 1 >= pw.buffer_len)
+    const len: usize = @intCast(pw.len);
+    if (len + utf8_size + 1 >= pw.buffer_len)
         return;
-    _ = utf8_encode(&pw.buffer[pw.len], codepoint);
-    pw.buffer[pw.len + utf8_size] = 0;
-    pw.len += utf8_size;
+    _ = utf8_encode(@ptrCast(&pw.buffer.?[len]), codepoint);
+    pw.buffer.?[len + utf8_size] = 0;
+    pw.len += @intCast(utf8_size);
 }
 
 // ── timer callbacks ──────────────────────────────────────────────────
@@ -394,7 +394,7 @@ export fn swaylock_handle_key(
                             _ = comm_main_write(
                                 types.CommMsg.broker_sel,
                                 id,
-                                strlen(id) + 1,
+                                std.mem.len(id.?) + 1,
                             );
                     }
                 } else {
@@ -410,7 +410,7 @@ export fn swaylock_handle_key(
                             _ = comm_main_write(
                                 types.CommMsg.auth_mode_sel,
                                 id,
-                                strlen(id) + 1,
+                                std.mem.len(id.?) + 1,
                             );
                     }
                 }

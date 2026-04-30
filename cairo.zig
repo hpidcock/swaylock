@@ -95,11 +95,11 @@ const GdkExports = if (opts.have_gdk_pixbuf) struct {
         const row_stride: usize = @intCast(stride);
         const cairo_row_stride: usize = @intCast(cstride);
         if (chan == 3) {
-            var i: c_int = h;
+            var i: i32 = h;
             while (i > 0) : (i -= 1) {
                 var gp: [*]const u8 = row_gdk;
                 var cp: [*]u8 = row_cairo;
-                var col: c_int = w;
+                var col: i32 = w;
                 while (col > 0) : (col -= 1) {
                     if (comptime builtin.cpu.arch.endian() == .little) {
                         cp[0] = gp[2];
@@ -117,11 +117,11 @@ const GdkExports = if (opts.have_gdk_pixbuf) struct {
                 row_cairo += cairo_row_stride;
             }
         } else {
-            var i: c_int = h;
+            var i: i32 = h;
             while (i > 0) : (i -= 1) {
                 var gp: [*]const u8 = row_gdk;
                 var cp: [*]u8 = row_cairo;
-                var col: c_int = w;
+                var col: i32 = w;
                 while (col > 0) : (col -= 1) {
                     if (comptime builtin.cpu.arch.endian() == .little) {
                         cp[0] = premulAlpha(gp[2], gp[3]);

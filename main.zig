@@ -22,16 +22,16 @@ const c = @cImport({
 
 const types = @import("types");
 const wl = types.c;
-const log_err: c_int = @intFromEnum(types.LogImportance.err);
-const log_info: c_int = @intFromEnum(types.LogImportance.info);
-const log_debug: c_int = @intFromEnum(types.LogImportance.debug);
+const log_err: i32 = @intFromEnum(types.LogImportance.err);
+const log_info: i32 = @intFromEnum(types.LogImportance.info);
+const log_debug: i32 = @intFromEnum(types.LogImportance.debug);
 
 // Log functions via C ABI (defined in log.zig).
-extern fn _swaylock_log(verbosity: c_int, fmt: [*c]const u8, ...) void;
+extern fn _swaylock_log(verbosity: i32, fmt: [*c]const u8, ...) void;
 extern fn _swaylock_strip_path(
     filepath: [*c]const u8,
 ) [*c]const u8;
-extern fn swaylock_log_init(verbosity: c_int) void;
+extern fn swaylock_log_init(verbosity: i32) void;
 
 // Loop functions.
 extern fn loop_create() ?*types.Loop;
@@ -39,15 +39,15 @@ extern fn loop_destroy(loop: *types.Loop) void;
 extern fn loop_poll(loop: *types.Loop) void;
 extern fn loop_add_fd(
     loop: *types.Loop,
-    fd: c_int,
-    mask: c_short,
+    fd: i32,
+    mask: i16,
     callback: types.FdCallback,
     data: ?*anyopaque,
 ) void;
-extern fn loop_remove_fd(loop: *types.Loop, fd: c_int) bool;
+extern fn loop_remove_fd(loop: *types.Loop, fd: i32) bool;
 extern fn loop_add_timer(
     loop: *types.Loop,
-    ms: c_int,
+    ms: i32,
     callback: types.TimerCallback,
     data: ?*anyopaque,
 ) ?*types.LoopTimer;
@@ -91,13 +91,13 @@ extern fn load_background_image(
 
 // Comm functions.
 extern fn spawn_comm_child() bool;
-extern fn comm_main_read(payload: *[*c]u8, len: *usize) c_int;
+extern fn comm_main_read(payload: *?[*]u8, len: *usize) i32;
 extern fn comm_main_write(
     msg_type: u8,
-    payload: [*c]const u8,
+    payload: ?[*]const u8,
     len: usize,
 ) bool;
-extern fn get_comm_reply_fd() c_int;
+extern fn get_comm_reply_fd() i32;
 extern fn write_comm_password(pw: *types.SwaylockPassword) bool;
 
 // Password functions.
@@ -108,7 +108,7 @@ extern fn swaylock_handle_key(
 ) void;
 extern fn schedule_auth_idle(state: *types.SwaylockState) void;
 extern fn clear_password_buffer(pw: *types.SwaylockPassword) void;
-extern fn password_buffer_create(size: usize) [*c]u8;
+extern fn password_buffer_create(size: usize) ?[*]u8;
 
 // Render function (defined in render.zig).
 extern fn render(surface: *types.SwaylockSurface) void;
@@ -123,25 +123,25 @@ extern fn initialize_pw_backend(argc: c_int, argv: [*c][*c]u8) void;
 extern fn authd_ui_layout_clear(layout: *types.AuthdUiLayout) void;
 extern fn authd_brokers_free(
     brokers: [*c]types.AuthdBroker,
-    count: c_int,
+    count: i32,
 ) void;
 extern fn authd_auth_modes_free(
     modes: [*c]types.AuthdAuthMode,
-    count: c_int,
+    count: i32,
 ) void;
 
 // getopt globals not always exposed by @cImport.
 extern var optarg: [*c]u8;
 extern var optind: c_int;
 
-var sigusr_fds: [2]c_int = .{ -1, -1 };
+var sigusr_fds: [2]i32 = .{ -1, -1 };
 var state: types.SwaylockState = std.mem.zeroes(types.SwaylockState);
 
 const LineMode = enum { line, inside, ring };
 
 /// Emit a log message with source location prepended.
 fn slog(
-    verbosity: c_int,
+    verbosity: i32,
     src: std.builtin.SourceLocation,
     comptime fmt: []const u8,
     args: anytype,
@@ -168,7 +168,7 @@ fn wlEntry(
 }
 
 /// Duplicate a Zig slice into a C malloc-owned null-terminated string.
-fn dupStr(s: []const u8) [*c]u8 {
+fn dupStr(s: []const u8) ?[*:0]u8 {
     const result = std.heap.c_allocator.dupeZ(u8, s) catch
         return null;
     return result.ptr;
@@ -192,15 +192,15 @@ fn parseColor(color_in: [*c]const u8) u32 {
     return res;
 }
 
-fn lenientStrcmp(a: [*c]const u8, b: [*c]const u8) c_int {
+fn lenientStrcmp(a: ?[*:0]const u8, b: ?[*:0]const u8) i32 {
     if (a == b) return 0;
     if (a == null) return -1;
     if (b == null) return 1;
-    return c.strcmp(a, b);
+    return c.strcmp(@ptrCast(a), @ptrCast(b));
 }
 
 fn daemonize() void {
-    var fds: [2]c_int = undefined;
+    var fds: [2]i32 = undefined;
     if (c.pipe(&fds) != 0) {
         slog(log_err, @src(), "Failed to pipe", .{});
         c.exit(1);
@@ -441,7 +441,7 @@ fn handleWlOutputName(
     _ = output;
     const surface: *types.SwaylockSurface =
         @ptrCast(@alignCast(data.?));
-    surface.output_name = c.strdup(name);
+    surface.output_name = @ptrCast(c.strdup(name));
 }
 
 fn handleWlOutputDescription(
@@ -658,7 +658,7 @@ fn selectImage(
     return default_image;
 }
 
-fn joinArgs(argv: [*c][*c]u8, argc: c_int) [*c]u8 {
+fn joinArgs(argv: [*c][*c]u8, argc: i32) [*c]u8 {
     std.debug.assert(argc > 0);
     var len: usize = 0;
     var i: usize = 0;
@@ -691,11 +691,11 @@ fn loadImage(arg: [*c]u8, st: *types.SwaylockState) void {
         image.output_name = if (separator == arg)
             null
         else
-            c.strdup(arg);
-        image.path = c.strdup(separator + 1);
+            @ptrCast(c.strdup(arg));
+        image.path = @ptrCast(c.strdup(separator + 1));
     } else {
         image.output_name = null;
-        image.path = c.strdup(arg);
+        image.path = @ptrCast(c.strdup(arg));
     }
     // Replace any existing image for the same output.
     const head = &st.images;
@@ -713,39 +713,42 @@ fn loadImage(arg: [*c]u8, st: *types.SwaylockState) void {
                     log_debug,
                     @src(),
                     "Replacing image defined for output {s} with {s}",
-                    .{ image.output_name, image.path },
+                    .{
+                        if (image.output_name) |n| @as([*:0]const u8, n) else "(null)",
+                        if (image.path) |p| @as([*:0]const u8, p) else "(null)",
+                    },
                 );
             } else {
                 slog(
                     log_debug,
                     @src(),
                     "Replacing default image with {s}",
-                    .{image.path},
+                    .{if (image.path) |p| @as([*:0]const u8, p) else "(null)"},
                 );
             }
             wl.wl_list_remove(&iter_image.link);
             c.free(iter_image.cairo_surface);
-            c.free(iter_image.output_name);
-            c.free(iter_image.path);
+            c.free(@ptrCast(iter_image.output_name));
+            c.free(@ptrCast(iter_image.path));
             std.heap.c_allocator.destroy(iter_image);
             break;
         }
     }
     // Escape double spaces so wordexp handles the path correctly.
-    while (c.strstr(image.path, "  ") != null) {
-        const old_len = c.strlen(image.path);
-        image.path = @ptrCast(c.realloc(image.path, old_len + 2));
-        const ptr: [*c]u8 = c.strstr(image.path, "  ") + 1;
+    while (c.strstr(@ptrCast(image.path), "  ") != null) {
+        const old_len = c.strlen(@ptrCast(image.path));
+        image.path = @ptrCast(c.realloc(@ptrCast(image.path), old_len + 2));
+        const ptr: [*c]u8 = c.strstr(@ptrCast(image.path), "  ") + 1;
         _ = c.memmove(ptr + 1, ptr, c.strlen(ptr) + 1);
         ptr[0] = '\\';
     }
     var p: c.wordexp_t = undefined;
-    if (c.wordexp(image.path, &p, 0) == 0) {
-        c.free(image.path);
-        image.path = joinArgs(p.we_wordv, @intCast(p.we_wordc));
+    if (c.wordexp(@ptrCast(image.path), &p, 0) == 0) {
+        c.free(@ptrCast(image.path));
+        image.path = @ptrCast(joinArgs(p.we_wordv, @intCast(p.we_wordc)));
         c.wordfree(&p);
     }
-    image.cairo_surface = load_background_image(image.path);
+    image.cairo_surface = load_background_image(@ptrCast(image.path));
     if (image.cairo_surface == null) {
         std.heap.c_allocator.destroy(image);
         return;
@@ -756,11 +759,8 @@ fn loadImage(arg: [*c]u8, st: *types.SwaylockState) void {
         @src(),
         "Loaded image {s} for output {s}",
         .{
-            image.path,
-            if (image.output_name != null)
-                @as([*c]const u8, image.output_name)
-            else
-                @as([*c]const u8, "*"),
+            if (image.path) |img_path| @as([*:0]const u8, img_path) else "(null)",
+            if (image.output_name) |n| @as([*:0]const u8, n) else "*",
         },
     );
 }
@@ -806,42 +806,42 @@ fn setDefaultColors(colors: *types.SwaylockColors) void {
 }
 
 // Long option codes starting above the ASCII range.
-const lo_bs_hl_color: c_int = 256;
-const lo_caps_lock_bs_hl_color: c_int = 257;
-const lo_caps_lock_key_hl_color: c_int = 258;
-const lo_font: c_int = 259;
-const lo_font_size: c_int = 260;
-const lo_ind_idle_visible: c_int = 261;
-const lo_ind_radius: c_int = 262;
-const lo_ind_x_position: c_int = 263;
-const lo_ind_y_position: c_int = 264;
-const lo_ind_thickness: c_int = 265;
-const lo_inside_color: c_int = 266;
-const lo_inside_clear_color: c_int = 267;
-const lo_inside_caps_lock_color: c_int = 268;
-const lo_inside_ver_color: c_int = 269;
-const lo_inside_wrong_color: c_int = 270;
-const lo_key_hl_color: c_int = 271;
-const lo_layout_txt_color: c_int = 272;
-const lo_layout_bg_color: c_int = 273;
-const lo_layout_border_color: c_int = 274;
-const lo_line_color: c_int = 275;
-const lo_line_clear_color: c_int = 276;
-const lo_line_caps_lock_color: c_int = 277;
-const lo_line_ver_color: c_int = 278;
-const lo_line_wrong_color: c_int = 279;
-const lo_ring_color: c_int = 280;
-const lo_ring_clear_color: c_int = 281;
-const lo_ring_caps_lock_color: c_int = 282;
-const lo_ring_ver_color: c_int = 283;
-const lo_ring_wrong_color: c_int = 284;
-const lo_sep_color: c_int = 285;
-const lo_text_color: c_int = 286;
-const lo_text_clear_color: c_int = 287;
-const lo_text_caps_lock_color: c_int = 288;
-const lo_text_ver_color: c_int = 289;
-const lo_text_wrong_color: c_int = 290;
-const lo_steal_unlock: c_int = 291;
+const lo_bs_hl_color: i32 = 256;
+const lo_caps_lock_bs_hl_color: i32 = 257;
+const lo_caps_lock_key_hl_color: i32 = 258;
+const lo_font: i32 = 259;
+const lo_font_size: i32 = 260;
+const lo_ind_idle_visible: i32 = 261;
+const lo_ind_radius: i32 = 262;
+const lo_ind_x_position: i32 = 263;
+const lo_ind_y_position: i32 = 264;
+const lo_ind_thickness: i32 = 265;
+const lo_inside_color: i32 = 266;
+const lo_inside_clear_color: i32 = 267;
+const lo_inside_caps_lock_color: i32 = 268;
+const lo_inside_ver_color: i32 = 269;
+const lo_inside_wrong_color: i32 = 270;
+const lo_key_hl_color: i32 = 271;
+const lo_layout_txt_color: i32 = 272;
+const lo_layout_bg_color: i32 = 273;
+const lo_layout_border_color: i32 = 274;
+const lo_line_color: i32 = 275;
+const lo_line_clear_color: i32 = 276;
+const lo_line_caps_lock_color: i32 = 277;
+const lo_line_ver_color: i32 = 278;
+const lo_line_wrong_color: i32 = 279;
+const lo_ring_color: i32 = 280;
+const lo_ring_clear_color: i32 = 281;
+const lo_ring_caps_lock_color: i32 = 282;
+const lo_ring_ver_color: i32 = 283;
+const lo_ring_wrong_color: i32 = 284;
+const lo_sep_color: i32 = 285;
+const lo_text_color: i32 = 286;
+const lo_text_clear_color: i32 = 287;
+const lo_text_caps_lock_color: i32 = 288;
+const lo_text_ver_color: i32 = 289;
+const lo_text_wrong_color: i32 = 290;
+const lo_steal_unlock: i32 = 291;
 
 const usage =
     "Usage: swaylock [options...]\n" ++
@@ -1134,8 +1134,8 @@ fn parseOptions(
             },
             lo_font => {
                 if (st) |s| {
-                    c.free(s.args.font);
-                    s.args.font = c.strdup(optarg);
+                    c.free(@ptrCast(s.args.font));
+                    s.args.font = @ptrCast(c.strdup(optarg));
                 }
             },
             lo_font_size => {
@@ -1388,8 +1388,8 @@ fn authdStageStr(s: types.AuthdStage) [*c]const u8 {
 }
 
 fn displayIn(
-    fd: c_int,
-    mask: c_short,
+    fd: i32,
+    mask: i16,
     data: ?*anyopaque,
 ) callconv(std.builtin.CallingConvention.c) void {
     _ = fd;
@@ -1400,8 +1400,8 @@ fn displayIn(
 }
 
 fn commIn(
-    fd: c_int,
-    mask: c_short,
+    fd: i32,
+    mask: i16,
     data: ?*anyopaque,
 ) callconv(std.builtin.CallingConvention.c) void {
     _ = fd;
@@ -1427,10 +1427,10 @@ fn commIn(
         }
         return;
     }
-    var payload: [*c]u8 = null;
+    var payload: ?[*]u8 = null;
     var len: usize = 0;
     const msg_type = comm_main_read(&payload, &len);
-    defer c.free(payload);
+    defer c.free(@ptrCast(payload));
     if (msg_type <= 0) {
         if (msg_type == 0) c.exit(c.EXIT_FAILURE);
         slog(
@@ -1456,7 +1456,7 @@ fn commIn(
         if (payload) |p| p[0..len] else &.{};
     switch (msg_type) {
         types.CommMsg.auth_result => {
-            if (len >= 1 and payload != null and payload[0] == 0x01) {
+            if (len >= 1 and payload != null and payload.?[0] == 0x01) {
                 slog(
                     log_debug,
                     @src(),
@@ -1520,7 +1520,7 @@ fn commIn(
         types.CommMsg.ui_layout => {
             // Parse UILayout JSON object.
             authd_ui_layout_clear(&state.authd_layout);
-            c.free(state.authd_error);
+            c.free(@ptrCast(state.authd_error));
             state.authd_error = null;
             parseUiLayout(payload_slice);
             slog(
@@ -1529,18 +1529,9 @@ fn commIn(
                 "comm_in: UI_LAYOUT type={s} label={s} entry={s} " ++
                     "wait={d} auth={s} -> idle/challenge",
                 .{
-                    if (state.authd_layout.type != null)
-                        @as([*c]const u8, state.authd_layout.type)
-                    else
-                        @as([*c]const u8, "(null)"),
-                    if (state.authd_layout.label != null)
-                        state.authd_layout.label
-                    else
-                        @as([*c]const u8, "(null)"),
-                    if (state.authd_layout.entry != null)
-                        state.authd_layout.entry
-                    else
-                        @as([*c]const u8, "(null)"),
+                    if (state.authd_layout.type) |t| @as([*:0]const u8, t) else "(null)",
+                    if (state.authd_layout.label) |l| @as([*:0]const u8, l) else "(null)",
+                    if (state.authd_layout.entry) |e| @as([*:0]const u8, e) else "(null)",
                     @intFromBool(state.authd_layout.wait),
                     authStateStr(state.auth_state),
                 },
@@ -1552,7 +1543,7 @@ fn commIn(
         types.CommMsg.stage => {
             if (len >= 1) {
                 const new_stage: types.AuthdStage =
-                    @enumFromInt(@as(c_int, payload[0]));
+                    @enumFromInt(@as(c_int, payload.?[0]));
                 if (state.auth_state == .validating) {
                     slog(
                         log_debug,
@@ -1585,7 +1576,7 @@ fn commIn(
         },
         types.CommMsg.auth_event => {
             // Intermediate result — show as error/info.
-            c.free(state.authd_error);
+            c.free(@ptrCast(state.authd_error));
             state.authd_error = null;
             parseAuthEvent(payload_slice);
             slog(
@@ -1593,10 +1584,7 @@ fn commIn(
                 @src(),
                 "comm_in: AUTH_EVENT msg={s} auth={s} -> idle",
                 .{
-                    if (state.authd_error != null)
-                        state.authd_error
-                    else
-                        @as([*c]const u8, "(null)"),
+                    if (state.authd_error) |e| @as([*:0]const u8, e) else "(null)",
                     authStateStr(state.auth_state),
                 },
             );
@@ -1707,8 +1695,8 @@ fn parseAuthEvent(json: []const u8) void {
 }
 
 fn termIn(
-    fd: c_int,
-    mask: c_short,
+    fd: i32,
+    mask: i16,
     data: ?*anyopaque,
 ) callconv(std.builtin.CallingConvention.c) void {
     _ = fd;
@@ -1767,7 +1755,7 @@ export fn main(argc: c_int, argv: [*c][*c]u8) c_int {
     state.authd_error = null;
     state.args = std.mem.zeroes(types.SwaylockArgs);
     state.args.mode = .fill;
-    state.args.font = c.strdup("sans-serif");
+    state.args.font = @ptrCast(c.strdup("sans-serif"));
     state.args.font_size = 0;
     state.args.radius = 50;
     state.args.thickness = 10;
@@ -1806,7 +1794,7 @@ export fn main(argc: c_int, argv: [*c][*c]u8) c_int {
             loadConfig(config_path, &state, &line_mode);
         c.free(config_path);
         if (config_status != 0) {
-            c.free(state.args.font);
+            c.free(@ptrCast(state.args.font));
             return config_status;
         }
     }
@@ -1814,7 +1802,7 @@ export fn main(argc: c_int, argv: [*c][*c]u8) c_int {
         slog(log_debug, @src(), "Parsing CLI Args", .{});
         result = parseOptions(argc, argv, &state, &line_mode, null);
         if (result != 0) {
-            c.free(state.args.font);
+            c.free(@ptrCast(state.args.font));
             return result;
         }
     }
@@ -1829,9 +1817,9 @@ export fn main(argc: c_int, argv: [*c][*c]u8) c_int {
     state.password.buffer =
         password_buffer_create(state.password.buffer_len);
     if (state.password.buffer == null) return c.EXIT_FAILURE;
-    state.password.buffer[0] = 0;
+    state.password.buffer.?[0] = 0;
 
-    if (c.pipe(&sigusr_fds) != 0) {
+    if (c.pipe(@ptrCast(&sigusr_fds)) != 0) {
         slog(log_err, @src(), "Failed to pipe", .{});
         return c.EXIT_FAILURE;
     }
@@ -1850,7 +1838,7 @@ export fn main(argc: c_int, argv: [*c][*c]u8) c_int {
         types.c.xkb_context_new(types.c.XKB_CONTEXT_NO_FLAGS);
     state.display = wl.wl_display_connect(null);
     if (state.display == null) {
-        c.free(state.args.font);
+        c.free(@ptrCast(state.args.font));
         slog(
             log_err,
             @src(),
@@ -1951,7 +1939,7 @@ export fn main(argc: c_int, argv: [*c][*c]u8) c_int {
     );
 
     if (wl.wl_display_roundtrip(state.display) == -1) {
-        c.free(state.args.font);
+        c.free(@ptrCast(state.args.font));
         return 1;
     }
 
@@ -2001,21 +1989,21 @@ export fn main(argc: c_int, argv: [*c][*c]u8) c_int {
     loop_add_fd(
         state.eventloop.?,
         wl.wl_display_get_fd(state.display),
-        @as(c_short, @intCast(wl.POLLIN)),
+        @as(i16, @intCast(wl.POLLIN)),
         displayIn,
         null,
     );
     loop_add_fd(
         state.eventloop.?,
         get_comm_reply_fd(),
-        @as(c_short, @intCast(wl.POLLIN)),
+        @as(i16, @intCast(wl.POLLIN)),
         commIn,
         null,
     );
     loop_add_fd(
         state.eventloop.?,
         sigusr_fds[0],
-        @as(c_short, @intCast(wl.POLLIN)),
+        @as(i16, @intCast(wl.POLLIN)),
         termIn,
         null,
     );
@@ -2055,7 +2043,7 @@ export fn main(argc: c_int, argv: [*c][*c]u8) c_int {
     state.ext_session_lock_v1 = null;
     _ = wl.wl_display_roundtrip(state.display);
 
-    c.free(state.args.font);
+    c.free(@ptrCast(state.args.font));
     types.c.cairo_destroy(state.test_cairo);
     types.c.cairo_surface_destroy(state.test_surface);
     return 0;

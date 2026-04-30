@@ -7,11 +7,11 @@ const std = @import("std");
 /// Returns the byte size of the last UTF-8 character in the
 /// null-terminated string str, or 0 if the string is empty.
 /// Does not validate that the buffer contains correct UTF-8.
-export fn utf8_last_size(str: [*c]const u8) c_int {
+export fn utf8_last_size(str: [*c]const u8) i32 {
     const s = std.mem.sliceTo(str, 0);
     if (s.len == 0) return 0;
     var i: usize = s.len;
-    var len: c_int = 0;
+    var len: i32 = 0;
     while (i > 0) {
         i -= 1;
         len += 1;
@@ -47,7 +47,7 @@ export fn utf8_encode(str: [*c]u8, ch: u32) usize {
 
 /// Returns the byte length of the next UTF-8 character at s[0],
 /// or -1 if s[0] is a continuation byte or otherwise invalid.
-export fn utf8_size(s: [*c]const u8) c_int {
+export fn utf8_size(s: [*c]const u8) i32 {
     const n = std.unicode.utf8ByteSequenceLength(s[0]) catch
         return -1;
     return @intCast(n);

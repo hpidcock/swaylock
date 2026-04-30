@@ -9,8 +9,8 @@ const types = @import("types");
 // No local C imports needed — cairo types come from types.c.
 const c = types.c;
 
-const log_err: c_int = @intFromEnum(types.LogImportance.err);
-extern fn _swaylock_log(verbosity: c_int, fmt: [*c]const u8, ...) void;
+const log_err: i32 = @intFromEnum(types.LogImportance.err);
+extern fn _swaylock_log(verbosity: i32, fmt: [*c]const u8, ...) void;
 extern fn _swaylock_strip_path(filepath: [*c]const u8) [*c]const u8;
 
 // Minimal hand-rolled declarations for the gdk-pixbuf/glib symbols
@@ -39,7 +39,7 @@ extern fn g_object_unref(object: ?*anyopaque) void;
 /// Formats a message and passes it to the swaylock logger,
 /// attaching the source location captured at the call site.
 fn slog(
-    verbosity: c_int,
+    verbosity: i32,
     src: std.builtin.SourceLocation,
     comptime fmt: []const u8,
     args: anytype,
@@ -162,8 +162,8 @@ pub export fn render_background_image(
     cairo: ?*c.cairo_t,
     image: ?*c.cairo_surface_t,
     mode: types.BackgroundMode,
-    buffer_width: c_int,
-    buffer_height: c_int,
+    buffer_width: i32,
+    buffer_height: i32,
 ) void {
     const width: f64 = @floatFromInt(
         c.cairo_image_surface_get_width(image),

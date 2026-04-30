@@ -11,8 +11,8 @@ const qrencode = if (opts.have_qrencode) @cImport({
     @cInclude("qrencode.h");
 }) else struct {};
 
-const log_err: c_int = @intFromEnum(types.LogImportance.err);
-extern fn _swaylock_log(verbosity: c_int, fmt: [*c]const u8, ...) void;
+const log_err: i32 = @intFromEnum(types.LogImportance.err);
+extern fn _swaylock_log(verbosity: i32, fmt: [*c]const u8, ...) void;
 extern fn _swaylock_strip_path(filepath: [*c]const u8) [*c]const u8;
 extern fn cairo_set_source_u32(cairo: ?*wl.cairo_t, color: u32) void;
 extern fn to_cairo_subpixel_order(
@@ -22,8 +22,8 @@ extern fn render_background_image(
     cairo: ?*wl.cairo_t,
     image: ?*wl.cairo_surface_t,
     mode: types.BackgroundMode,
-    buffer_width: c_int,
-    buffer_height: c_int,
+    buffer_width: i32,
+    buffer_height: i32,
 ) void;
 extern fn get_next_buffer(
     shm: ?*wl.wl_shm,
@@ -34,12 +34,12 @@ extern fn get_next_buffer(
 extern fn create_buffer(
     shm: ?*wl.wl_shm,
     buffer: *types.PoolBuffer,
-    width: c_int,
-    height: c_int,
+    width: i32,
+    height: i32,
     format: u32,
 ) ?*types.PoolBuffer;
 extern fn destroy_buffer(buffer: *types.PoolBuffer) void;
-extern fn swaylock_log_get_overlay(count_out: *c_int) [*c][220]u8;
+extern fn swaylock_log_get_overlay(count_out: *i32) ?[*][220]u8;
 
 const pi: f64 = math.pi;
 /// Angular range of the typing indicator arc.
@@ -106,14 +106,14 @@ fn render_debug_overlay(surface: *types.SwaylockSurface) void {
         const state: *types.SwaylockState = surface.state.?;
         if (surface.width == 0 or surface.height == 0) return;
 
-        var count: c_int = 0;
+        var count: i32 = 0;
         const lines = swaylock_log_get_overlay(&count);
         if (count == 0) return;
 
         const font_size: f64 = fd(surface.scale) * 12.0;
         wl.cairo_select_font_face(
             state.test_cairo,
-            state.args.font,
+            @ptrCast(state.args.font),
             wl.CAIRO_FONT_SLANT_NORMAL,
             wl.CAIRO_FONT_WEIGHT_NORMAL,
         );
@@ -162,7 +162,7 @@ fn render_debug_overlay(surface: *types.SwaylockSurface) void {
 
         wl.cairo_select_font_face(
             cr,
-            state.args.font,
+            @ptrCast(state.args.font),
             wl.CAIRO_FONT_SLANT_NORMAL,
             wl.CAIRO_FONT_WEIGHT_NORMAL,
         );
@@ -292,7 +292,7 @@ fn configure_font_drawing(
     wl.cairo_set_font_options(cairo, fo);
     wl.cairo_select_font_face(
         cairo,
-        state.args.font,
+        @ptrCast(state.args.font),
         wl.CAIRO_FONT_SLANT_NORMAL,
         wl.CAIRO_FONT_WEIGHT_NORMAL,
     );
@@ -547,7 +547,7 @@ fn render_frame(surface: *types.SwaylockSurface) bool {
         state.authd_layout.type != null and
         std.mem.eql(
             u8,
-            std.mem.sliceTo(state.authd_layout.type, 0),
+            std.mem.sliceTo(state.authd_layout.type.?, 0),
             "qrcode",
         );
 
@@ -566,7 +566,7 @@ fn render_frame(surface: *types.SwaylockSurface) bool {
             state.authd_layout.qr_content != null)
         {
             const qr = qrencode.QRcode_encodeString(
-                state.authd_layout.qr_content,
+                @ptrCast(state.authd_layout.qr_content),
                 0,
                 qrencode.QR_ECLEVEL_L,
                 qrencode.QR_MODE_8,
@@ -593,7 +593,7 @@ fn render_frame(surface: *types.SwaylockSurface) bool {
         }
         // Reserve height for the human-readable fallback code.
         if (state.authd_layout.qr_code != null and
-            state.authd_layout.qr_code[0] != 0)
+            state.authd_layout.qr_code.?[0] != 0)
         {
             wl.cairo_set_antialias(
                 state.test_cairo,
@@ -609,7 +609,7 @@ fn render_frame(surface: *types.SwaylockSurface) bool {
             var fe: wl.cairo_font_extents_t = undefined;
             wl.cairo_text_extents(
                 state.test_cairo,
-                state.authd_layout.qr_code,
+                @ptrCast(state.authd_layout.qr_code),
                 &ext,
             );
             wl.cairo_font_extents(state.test_cairo, &fe);
@@ -690,12 +690,12 @@ fn render_frame(surface: *types.SwaylockSurface) bool {
 
         if (!is_qrcode and
             state.authd_layout.label != null and
-            state.authd_layout.label[0] != 0)
+            state.authd_layout.label.?[0] != 0)
         {
             var ext: wl.cairo_text_extents_t = undefined;
             wl.cairo_text_extents(
                 state.test_cairo,
-                state.authd_layout.label,
+                @ptrCast(state.authd_layout.label),
                 &ext,
             );
             label_box_h = fe.height + 2.0 * box_padding;
@@ -710,12 +710,12 @@ fn render_frame(surface: *types.SwaylockSurface) bool {
         }
         if (!is_qrcode and
             state.authd_layout.button != null and
-            state.authd_layout.button[0] != 0)
+            state.authd_layout.button.?[0] != 0)
         {
             var ext: wl.cairo_text_extents_t = undefined;
             wl.cairo_text_extents(
                 state.test_cairo,
-                state.authd_layout.button,
+                @ptrCast(state.authd_layout.button),
                 &ext,
             );
             button_box_h = fe.height + 2.0 * box_padding;
@@ -729,12 +729,12 @@ fn render_frame(surface: *types.SwaylockSurface) bool {
             }
         }
         if (state.authd_error != null and
-            state.authd_error[0] != 0)
+            state.authd_error.?[0] != 0)
         {
             var ext: wl.cairo_text_extents_t = undefined;
             wl.cairo_text_extents(
                 state.test_cairo,
-                state.authd_error,
+                @ptrCast(state.authd_error),
                 &ext,
             );
             error_h = fe.height + box_padding;
@@ -828,9 +828,9 @@ fn render_frame(surface: *types.SwaylockSurface) bool {
         if (comptime opts.have_qrencode) {
             if (qrcode_opaque) |qr_opaque| {
                 const qr: *qrencode.QRcode = @ptrCast(qr_opaque);
-                const mod_size: c_int = 4 * scale;
-                const qr_px: c_int = qr.width * mod_size;
-                const qr_x: c_int =
+                const mod_size: i32 = 4 * scale;
+                const qr_px: i32 = qr.width * mod_size;
+                const qr_x: i32 =
                     @divTrunc(buffer_width - qr_px, 2);
 
                 // White background behind QR modules.
@@ -846,9 +846,9 @@ fn render_frame(surface: *types.SwaylockSurface) bool {
 
                 // Collect all dark modules then fill in one pass.
                 wl.cairo_set_source_rgb(cairo, 0, 0, 0);
-                var row: c_int = 0;
+                var row: i32 = 0;
                 while (row < qr.width) : (row += 1) {
-                    var col: c_int = 0;
+                    var col: i32 = 0;
                     while (col < qr.width) : (col += 1) {
                         const px = qr.data[
                             @intCast(row * qr.width + col)
@@ -871,12 +871,12 @@ fn render_frame(surface: *types.SwaylockSurface) bool {
         }
 
         if (state.authd_layout.qr_code != null and
-            state.authd_layout.qr_code[0] != 0)
+            state.authd_layout.qr_code.?[0] != 0)
         {
             var ext: wl.cairo_text_extents_t = undefined;
             wl.cairo_text_extents(
                 cairo,
-                state.authd_layout.qr_code,
+                @ptrCast(state.authd_layout.qr_code),
                 &ext,
             );
             const tx: f64 =
@@ -895,13 +895,13 @@ fn render_frame(surface: *types.SwaylockSurface) bool {
             }
             wl.cairo_move_to(cairo, tx, ty);
             cairo_set_source_u32(cairo, state.args.colors.layout_text);
-            wl.cairo_show_text(cairo, state.authd_layout.qr_code);
+            wl.cairo_show_text(cairo, @ptrCast(state.authd_layout.qr_code));
         }
 
         // Error text below QR content.
         if (error_h > 0) {
             var ext: wl.cairo_text_extents_t = undefined;
-            wl.cairo_text_extents(cairo, state.authd_error, &ext);
+            wl.cairo_text_extents(cairo, @ptrCast(state.authd_error), &ext);
             const tx: f64 =
                 (fd(buffer_width) - ext.width) / 2.0 -
                 ext.x_bearing;
@@ -910,7 +910,7 @@ fn render_frame(surface: *types.SwaylockSurface) bool {
                 box_padding / 2.0;
             wl.cairo_move_to(cairo, tx, ty);
             cairo_set_source_u32(cairo, error_text_color);
-            wl.cairo_show_text(cairo, state.authd_error);
+            wl.cairo_show_text(cairo, @ptrCast(state.authd_error));
         }
     } else if (draw_indicator) {
         configure_font_drawing(cairo, state, surface.subpixel, arc_radius);
@@ -922,7 +922,7 @@ fn render_frame(surface: *types.SwaylockSurface) bool {
             wl.cairo_font_extents(cairo, &fe);
             wl.cairo_text_extents(
                 cairo,
-                state.authd_layout.label,
+                @ptrCast(state.authd_layout.label),
                 &ext,
             );
             const box_padding: f64 = 4.0 * fd(scale);
@@ -948,7 +948,7 @@ fn render_frame(surface: *types.SwaylockSurface) bool {
                 (fe.height - fe.descent) + box_padding,
             );
             cairo_set_source_u32(cairo, state.args.colors.layout_text);
-            wl.cairo_show_text(cairo, state.authd_layout.label);
+            wl.cairo_show_text(cairo, @ptrCast(state.authd_layout.label));
             wl.cairo_new_sub_path(cairo);
         }
 
@@ -1167,7 +1167,7 @@ fn render_frame(surface: *types.SwaylockSurface) bool {
                 var ext: wl.cairo_text_extents_t = undefined;
                 wl.cairo_text_extents(
                     cairo,
-                    state.authd_layout.button,
+                    @ptrCast(state.authd_layout.button),
                     &ext,
                 );
                 const bw: f64 =
@@ -1236,7 +1236,7 @@ fn render_frame(surface: *types.SwaylockSurface) bool {
                     cairo,
                     state.args.colors.layout_text,
                 );
-                wl.cairo_show_text(cairo, state.authd_layout.button);
+                wl.cairo_show_text(cairo, @ptrCast(state.authd_layout.button));
                 wl.cairo_new_sub_path(cairo);
 
                 y += button_box_h;
@@ -1244,7 +1244,7 @@ fn render_frame(surface: *types.SwaylockSurface) bool {
 
             if (error_h > 0) {
                 var ext: wl.cairo_text_extents_t = undefined;
-                wl.cairo_text_extents(cairo, state.authd_error, &ext);
+                wl.cairo_text_extents(cairo, @ptrCast(state.authd_error), &ext);
                 const tx: f64 =
                     (fd(buffer_width) - ext.width) / 2.0 -
                     ext.x_bearing;
@@ -1253,7 +1253,7 @@ fn render_frame(surface: *types.SwaylockSurface) bool {
                     box_padding / 2.0;
                 wl.cairo_move_to(cairo, tx, ty);
                 cairo_set_source_u32(cairo, error_text_color);
-                wl.cairo_show_text(cairo, state.authd_error);
+                wl.cairo_show_text(cairo, @ptrCast(state.authd_error));
                 wl.cairo_new_sub_path(cairo);
             }
         }

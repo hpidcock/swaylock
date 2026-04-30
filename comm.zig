@@ -4,12 +4,12 @@
 const std = @import("std");
 const types = @import("types");
 
-const log_err: c_int = @intFromEnum(types.LogImportance.err);
+const log_err: i32 = @intFromEnum(types.LogImportance.err);
 
-extern fn _swaylock_log(verbosity: c_int, fmt: [*c]const u8, ...) void;
+extern fn _swaylock_log(verbosity: i32, fmt: [*c]const u8, ...) void;
 extern fn _swaylock_strip_path(filepath: [*c]const u8) [*c]const u8;
-extern fn password_buffer_create(size: usize) [*c]u8;
-extern fn password_buffer_destroy(buffer: [*c]u8, size: usize) void;
+extern fn password_buffer_create(size: usize) ?[*]u8;
+extern fn password_buffer_destroy(buffer: ?[*]u8, size: usize) void;
 extern fn clear_password_buffer(pw: *types.SwaylockPassword) void;
 
 const c = @cImport({
@@ -31,7 +31,7 @@ const comm_max_payload: usize = 1 << 20;
 
 // comm_fds[0]: main→child  (main writes [1], child reads [0])
 // comm_fds[1]: child→main  (child writes [1], main reads [0])
-var comm_fds: [2][2]c_int = .{ .{ -1, -1 }, .{ -1, -1 } };
+var comm_fds: [2][2]i32 = .{ .{ -1, -1 }, .{ -1, -1 } };
 
 fn slog(
     verbosity: anytype,
@@ -71,7 +71,7 @@ fn slogErrno(
     );
 }
 
-fn readFull(fd: c_int, dst: []u8) isize {
+fn readFull(fd: i32, dst: []u8) isize {
     var offset: usize = 0;
     while (offset < dst.len) {
         const n = c.read(fd, @ptrCast(dst[offset..].ptr), dst.len - offset);
@@ -94,7 +94,7 @@ fn readFull(fd: c_int, dst: []u8) isize {
     return @intCast(offset);
 }
 
-fn writeFull(fd: c_int, src: []const u8) bool {
+fn writeFull(fd: i32, src: []const u8) bool {
     var offset: usize = 0;
     while (offset < src.len) {
         const n = c.write(
@@ -127,10 +127,10 @@ fn storeLe32(b: *[4]u8, v: u32) void {
 }
 
 fn commRead(
-    fd: c_int,
-    payload: *[*c]u8,
+    fd: i32,
+    payload: *?[*]u8,
     len: *usize,
-) c_int {
+) i32 {
     var msg_type: u8 = undefined;
     var n = readFull(fd, std.mem.asBytes(&msg_type));
     if (n <= 0) {
@@ -154,7 +154,7 @@ fn commRead(
         payload.* = null;
         return -1;
     }
-    var buf: [*c]u8 = null;
+    var buf: ?[*]u8 = null;
     if (plen > 0) {
         buf = @ptrCast(c.malloc(plen + 1));
         if (buf == null) {
@@ -162,13 +162,13 @@ fn commRead(
             payload.* = null;
             return -1;
         }
-        n = readFull(fd, buf[0..plen]);
+        n = readFull(fd, buf.?[0..plen]);
         if (n <= 0) {
-            c.free(buf);
+            c.free(@ptrCast(buf));
             payload.* = null;
             return -1;
         }
-        buf[plen] = 0;
+        buf.?[plen] = 0;
     }
     payload.* = buf;
     len.* = plen;
@@ -176,9 +176,9 @@ fn commRead(
 }
 
 fn commWrite(
-    fd: c_int,
+    fd: i32,
     msg_type: u8,
-    payload: [*c]const u8,
+    payload: ?[*]const u8,
     len: usize,
 ) bool {
     if (!writeFull(fd, std.mem.asBytes(&msg_type))) return false;
@@ -186,55 +186,55 @@ fn commWrite(
     storeLe32(&plen_buf, @intCast(len));
     if (!writeFull(fd, &plen_buf)) return false;
     if (len > 0 and payload != null) {
-        if (!writeFull(fd, payload[0..len])) return false;
+        if (!writeFull(fd, payload.?[0..len])) return false;
     }
     return true;
 }
 
 /// Returns the fd the child reads incoming messages from.
-export fn get_comm_child_fd() c_int {
+export fn get_comm_child_fd() i32 {
     return comm_fds[0][0];
 }
 
-export fn comm_child_read(payload: *[*c]u8, len: *usize) c_int {
+export fn comm_child_read(payload: *?[*]u8, len: *usize) i32 {
     return commRead(comm_fds[0][0], payload, len);
 }
 
 export fn comm_child_write(
     msg_type: u8,
-    payload: [*c]const u8,
+    payload: ?[*]const u8,
     len: usize,
 ) bool {
     return commWrite(comm_fds[1][1], msg_type, payload, len);
 }
 
-export fn comm_main_read(payload: *[*c]u8, len: *usize) c_int {
+export fn comm_main_read(payload: *?[*]u8, len: *usize) i32 {
     return commRead(comm_fds[1][0], payload, len);
 }
 
 export fn comm_main_write(
     msg_type: u8,
-    payload: [*c]const u8,
+    payload: ?[*]const u8,
     len: usize,
 ) bool {
     return commWrite(comm_fds[0][1], msg_type, payload, len);
 }
 
 /// Returns the fd to poll for messages from the child.
-export fn get_comm_reply_fd() c_int {
+export fn get_comm_reply_fd() i32 {
     return comm_fds[1][0];
 }
 
 /// Clears and sends the password buffer as a COMM_MSG_PASSWORD frame.
 /// The password buffer is always cleared before returning.
 export fn write_comm_password(pw: *types.SwaylockPassword) bool {
-    const size = pw.len + 1;
+    const size: usize = @intCast(pw.len + 1);
     const copy = password_buffer_create(size);
     if (copy == null) {
         clear_password_buffer(pw);
         return false;
     }
-    @memcpy(copy[0..size], pw.buffer[0..size]);
+    @memcpy(copy.?[0..size], pw.buffer.?[0..size]);
     clear_password_buffer(pw);
     const ok = commWrite(
         comm_fds[0][1],

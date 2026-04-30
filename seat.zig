@@ -16,7 +16,7 @@ const c = @cImport({
 
 const wl = types.c;
 
-const log_err: c_int = @intFromEnum(types.LogImportance.err);
+const log_err: i32 = @intFromEnum(types.LogImportance.err);
 
 extern fn _swaylock_log(
     verbosity: c_int,
@@ -28,7 +28,7 @@ extern fn _swaylock_strip_path(
 ) [*c]const u8;
 extern fn loop_add_timer(
     loop: *types.Loop,
-    ms: c_int,
+    ms: i32,
     callback: types.TimerCallback,
     data: ?*anyopaque,
 ) ?*types.LoopTimer;
@@ -44,7 +44,7 @@ extern fn swaylock_handle_key(
 extern fn damage_state(state: *types.SwaylockState) void;
 
 fn slog(
-    verbosity: c_int,
+    verbosity: i32,
     src: std.builtin.SourceLocation,
     comptime fmt: []const u8,
     args: anytype,

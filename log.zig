@@ -28,11 +28,11 @@ extern fn vsnprintf(
 ) c_int;
 
 // Importance levels – derived from the shared types enum.
-const log_silent: c_int = @intFromEnum(types.LogImportance.silent);
-const log_error: c_int = @intFromEnum(types.LogImportance.err);
-const log_info: c_int = @intFromEnum(types.LogImportance.info);
-const log_debug: c_int = @intFromEnum(types.LogImportance.debug);
-const log_importance_last: c_int = @intFromEnum(types.LogImportance.last);
+const log_silent: i32 = @intFromEnum(types.LogImportance.silent);
+const log_error: i32 = @intFromEnum(types.LogImportance.err);
+const log_info: i32 = @intFromEnum(types.LogImportance.info);
+const log_debug: i32 = @intFromEnum(types.LogImportance.debug);
+const log_importance_last: i32 = @intFromEnum(types.LogImportance.last);
 
 const verbosity_colors = [_][*:0]const u8{
     "", // LOG_SILENT
@@ -41,7 +41,7 @@ const verbosity_colors = [_][*:0]const u8{
     "\x1B[1;90m", // LOG_DEBUG
 };
 
-var log_importance: c_int = log_error;
+var log_importance: i32 = log_error;
 
 /// Line count and length for the debug overlay ring buffer.
 /// These must match LOG_OVERLAY_LINES / LOG_OVERLAY_LINE_LEN in log.h.
@@ -59,7 +59,7 @@ var overlay: if (opts.have_debug_overlay) OverlayState else void =
     if (opts.have_debug_overlay) std.mem.zeroes(OverlayState) else {};
 
 /// Sets the global log verbosity threshold.
-pub export fn swaylock_log_init(verbosity: c_int) callconv(.c) void {
+pub export fn swaylock_log_init(verbosity: i32) callconv(.c) void {
     if (verbosity < log_importance_last) {
         log_importance = verbosity;
     }
@@ -69,7 +69,7 @@ pub export fn swaylock_log_init(verbosity: c_int) callconv(.c) void {
 /// optional ANSI colour. The swaylock_log() macro in log.h calls
 /// this directly.
 pub export fn _swaylock_log(
-    verbosity: c_int,
+    verbosity: i32,
     fmt: [*c]const u8,
     ...,
 ) callconv(.c) void {
@@ -119,8 +119,8 @@ pub export fn _swaylock_log(
 /// The returned pointer is to an internal static buffer; callers
 /// must not free or write to it.
 pub export fn swaylock_log_get_overlay(
-    count_out: *c_int,
-) callconv(.c) [*c][overlay_line_len]u8 {
+    count_out: *i32,
+) callconv(.c) ?[*][overlay_line_len]u8 {
     if (comptime !opts.have_debug_overlay) {
         count_out.* = 0;
         return undefined;
@@ -132,7 +132,7 @@ pub export fn swaylock_log_get_overlay(
         const idx = (start + i) % overlay_lines;
         @memcpy(&overlay.snap[i], &overlay.ring[idx]);
     }
-    return @as([*c][overlay_line_len]u8, @ptrCast(&overlay.snap));
+    return @as(?[*][overlay_line_len]u8, @ptrCast(&overlay.snap));
 }
 
 /// Strips leading "./" path components from a source file literal.
