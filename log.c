@@ -7,6 +7,15 @@
 #include <unistd.h>
 #include "log.h"
 
+#if HAVE_DEBUG_OVERLAY
+static char overlay_ring[LOG_OVERLAY_LINES][LOG_OVERLAY_LINE_LEN];
+static int  overlay_head  = 0;
+static int  overlay_count = 0;
+
+/* Snapshot returned by swaylock_log_get_overlay, sorted oldest-first. */
+static char overlay_snap[LOG_OVERLAY_LINES][LOG_OVERLAY_LINE_LEN];
+#endif
+
 static enum log_importance log_importance = LOG_ERROR;
 
 static const char *verbosity_colors[] = {
@@ -55,7 +64,34 @@ void _swaylock_log(enum log_importance verbosity, const char *fmt, ...) {
 	fprintf(stderr, "\n");
 
 	va_end(args);
+
+#if HAVE_DEBUG_OVERLAY
+	/* Push only the message text (no timestamp) into the ring buffer.
+	 * We need a fresh va_list because the original has been consumed. */
+	va_list args2;
+	va_start(args2, fmt);
+	vsnprintf(overlay_ring[overlay_head], LOG_OVERLAY_LINE_LEN, fmt, args2);
+	va_end(args2);
+
+	overlay_head = (overlay_head + 1) % LOG_OVERLAY_LINES;
+	if (overlay_count < LOG_OVERLAY_LINES) {
+		overlay_count++;
+	}
+#endif
 }
+
+#if HAVE_DEBUG_OVERLAY
+const char (*swaylock_log_get_overlay(int *count))[LOG_OVERLAY_LINE_LEN] {
+	*count = overlay_count;
+	int start = (overlay_head - overlay_count + LOG_OVERLAY_LINES)
+		% LOG_OVERLAY_LINES;
+	for (int i = 0; i < overlay_count; i++) {
+		int idx = (start + i) % LOG_OVERLAY_LINES;
+		memcpy(overlay_snap[i], overlay_ring[idx], LOG_OVERLAY_LINE_LEN);
+	}
+	return (const char (*)[LOG_OVERLAY_LINE_LEN])overlay_snap;
+}
+#endif
 
 const char *_swaylock_strip_path(const char *filepath) {
 	if (*filepath == '.') {

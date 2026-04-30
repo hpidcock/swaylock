@@ -1,75 +1,59 @@
 #define _POSIX_C_SOURCE 200809L
+/* _DEFAULT_SOURCE exposes htobe32/htole32 (__USE_MISC) and the full
+ * putenv declaration required by the GDM PAM extension headers. */
+#define _DEFAULT_SOURCE 1
+#include <cjson/cJSON.h>
+#include <poll.h>
 #include <pwd.h>
 #include <security/pam_appl.h>
-#include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include "gdm/authd-gdm-extension.h"
 #include "comm.h"
 #include "log.h"
 #include "password-buffer.h"
 #include "swaylock.h"
 
-void initialize_pw_backend(int argc, char **argv) {
-	if (getuid() != geteuid() || getgid() != getegid()) {
-		swaylock_log(LOG_ERROR,
-			"swaylock is setuid, but was compiled with the PAM"
-			" backend. Run 'chmod a-s %s' to fix. Aborting.", argv[0]);
-		exit(EXIT_FAILURE);
-	}
-	if (!spawn_comm_child()) {
-		exit(EXIT_FAILURE);
-	}
+/* defined in comm.c; not exported in comm.h */
+extern int get_comm_child_fd(void);
+
+void authd_ui_layout_clear(struct authd_ui_layout *layout) {
+	free(layout->type);
+	free(layout->label);
+	free(layout->button);
+	free(layout->entry);
+	free(layout->qr_content);
+	free(layout->qr_code);
+	memset(layout, 0, sizeof(*layout));
 }
 
-struct conv_state {
-	char *password;
-};
-
-static int handle_conversation(int num_msg, const struct pam_message **msg,
-		struct pam_response **resp, void *data) {
-	struct conv_state *state = data;
-
-	/* PAM expects an array of responses, one for each message */
-	struct pam_response *pam_reply =
-		calloc(num_msg, sizeof(struct pam_response));
-	if (pam_reply == NULL) {
-		swaylock_log(LOG_ERROR, "Allocation failed");
-		return PAM_ABORT;
+void authd_brokers_free(struct authd_broker *brokers, int count) {
+	for (int i = 0; i < count; i++) {
+		free(brokers[i].id);
+		free(brokers[i].name);
 	}
-	*resp = pam_reply;
-	for (int i = 0; i < num_msg; ++i) {
-		switch (msg[i]->msg_style) {
-		case PAM_PROMPT_ECHO_OFF:
-		case PAM_PROMPT_ECHO_ON:
-			/* workaround pam_systemd_home internal retries:
-			 * https://github.com/systemd/systemd/blob/main/src/home/pam_systemd_home.c#L594-L599
-			 * if the password has already been rejected once, abort the conversation */
-			if (state->password == NULL) {
-				return PAM_ABORT;
-			}
-			pam_reply[i].resp = strdup(state->password); // PAM clears and frees this
-			if (pam_reply[i].resp == NULL) {
-				swaylock_log(LOG_ERROR, "Allocation failed");
-				return PAM_ABORT;
-			}
-			state->password = NULL;
-			break;
-		case PAM_ERROR_MSG:
-		case PAM_TEXT_INFO:
-			break;
-		}
+	free(brokers);
+}
+
+void authd_auth_modes_free(struct authd_auth_mode *modes, int count) {
+	for (int i = 0; i < count; i++) {
+		free(modes[i].id);
+		free(modes[i].label);
 	}
-	return PAM_SUCCESS;
+	free(modes);
 }
 
 static const char *get_pam_auth_error(int pam_status) {
 	switch (pam_status) {
 	case PAM_AUTH_ERR:
 		return "invalid credentials";
+	case PAM_PERM_DENIED:
+		return "permission denied; check /etc/pam.d/swaylock"
+			" is installed properly";
 	case PAM_CRED_INSUFFICIENT:
-		return "swaylock cannot authenticate users; check /etc/pam.d/swaylock "
-			"has been installed properly";
+		return "swaylock cannot authenticate users; check "
+			"/etc/pam.d/swaylock has been installed properly";
 	case PAM_AUTHINFO_UNAVAIL:
 		return "authentication information unavailable";
 	case PAM_MAXTRIES:
@@ -81,61 +65,490 @@ static const char *get_pam_auth_error(int pam_status) {
 	}
 }
 
+struct conv_state {
+	cJSON      *pending[64];
+	int         pending_count;
+	bool        user_selected_sent;
+	const char *username;
+};
+
+/* forward declaration */
+static char *handle_gdm_json(
+	struct conv_state *state, const char *json_in);
+
+static int handle_conversation(
+	int num_msg, const struct pam_message **msg,
+	struct pam_response **resp, void *data)
+{
+	struct conv_state *state = data;
+	struct pam_response *pam_reply =
+		calloc(num_msg, sizeof(struct pam_response));
+	if (!pam_reply) {
+		swaylock_log(LOG_ERROR, "allocation failed");
+		return PAM_ABORT;
+	}
+	*resp = pam_reply;
+	for (int i = 0; i < num_msg; i++) {
+		switch (msg[i]->msg_style) {
+		case PAM_PROMPT_ECHO_OFF:
+		case PAM_PROMPT_ECHO_ON: {
+			char *payload = NULL;
+			size_t len = 0;
+			int type;
+			do {
+				type = comm_child_read(&payload, &len);
+				if (type <= 0) {
+					return PAM_ABORT;
+				}
+				if (type != COMM_MSG_PASSWORD) {
+					free(payload);
+					payload = NULL;
+				}
+			} while (type != COMM_MSG_PASSWORD);
+			pam_reply[i].resp = strdup(payload);
+			clear_buffer(payload, len);
+			free(payload);
+			if (!pam_reply[i].resp) {
+				swaylock_log(LOG_ERROR, "allocation failed");
+				return PAM_ABORT;
+			}
+			break;
+		}
+#ifdef PAM_BINARY_PROMPT
+		case PAM_BINARY_PROMPT: {
+			const GdmPamExtensionJSONProtocol *ext =
+				(const GdmPamExtensionJSONProtocol *)
+				(const void *)msg[i]->msg;
+			if (!authd_gdm_message_is_valid(ext)) {
+				return PAM_ABORT;
+			}
+			char *response =
+				handle_gdm_json(state, ext->json);
+			if (!response) {
+				return PAM_ABORT;
+			}
+			GdmPamExtensionJSONProtocol *reply = calloc(
+				1, sizeof(GdmPamExtensionJSONProtocol));
+			if (!reply) {
+				free(response);
+				return PAM_ABORT;
+			}
+			authd_gdm_request_init(reply, response);
+			pam_reply[i].resp = (char *)(void *)reply;
+			break;
+		}
+#endif
+		case PAM_TEXT_INFO:
+		case PAM_ERROR_MSG:
+			break;
+		}
+	}
+	return PAM_SUCCESS;
+}
+
+static char *handle_gdm_json(
+	struct conv_state *state, const char *json_in)
+{
+	cJSON *root = cJSON_Parse(json_in);
+	if (!root) {
+		swaylock_log(LOG_ERROR,
+			"cJSON_Parse failed: %.80s", json_in);
+		return NULL;
+	}
+
+	cJSON *type_item =
+		cJSON_GetObjectItemCaseSensitive(root, "type");
+	if (!cJSON_IsString(type_item)) {
+		cJSON_Delete(root);
+		return NULL;
+	}
+	const char *type = type_item->valuestring;
+
+	cJSON *response = NULL;
+	if (strcmp(type, "hello") == 0) {
+		response = cJSON_CreateObject();
+		cJSON_AddStringToObject(response, "type", "hello");
+		cJSON *hello = cJSON_CreateObject();
+		cJSON_AddNumberToObject(hello, "version", 1);
+		cJSON_AddItemToObject(response, "hello", hello);
+
+	} else if (strcmp(type, "request") == 0) {
+		cJSON *req = cJSON_GetObjectItemCaseSensitive(
+			root, "request");
+		cJSON *req_type = cJSON_GetObjectItemCaseSensitive(
+			req, "type");
+		if (cJSON_IsString(req_type) && strcmp(
+				req_type->valuestring,
+				"uiLayoutCapabilities") == 0) {
+			cJSON *form = cJSON_CreateObject();
+			cJSON_AddStringToObject(form, "type", "form");
+			cJSON_AddStringToObject(form, "label", "required");
+			cJSON_AddStringToObject(form, "entry",
+				"optional:chars,chars_password,"
+				"digits,digits_password");
+			cJSON_AddStringToObject(
+				form, "wait", "optional:true,false");
+			cJSON_AddStringToObject(form, "button", "optional");
+
+			cJSON *newpw = cJSON_CreateObject();
+			cJSON_AddStringToObject(
+				newpw, "type", "newpassword");
+			cJSON_AddStringToObject(
+				newpw, "label", "required");
+			cJSON_AddStringToObject(newpw, "entry",
+				"optional:chars,chars_password,"
+				"digits,digits_password");
+			cJSON_AddStringToObject(
+				newpw, "button", "optional");
+
+			cJSON *qr = cJSON_CreateObject();
+			cJSON_AddStringToObject(qr, "type", "qrcode");
+			cJSON_AddStringToObject(qr, "content", "required");
+			cJSON_AddStringToObject(qr, "code", "optional");
+			cJSON_AddStringToObject(
+				qr, "wait", "required:true,false");
+			cJSON_AddStringToObject(qr, "label", "optional");
+			cJSON_AddStringToObject(qr, "button", "optional");
+			cJSON_AddBoolToObject(qr, "rendersQrcode", true);
+
+			cJSON *layouts = cJSON_CreateArray();
+			cJSON_AddItemToArray(layouts, form);
+			cJSON_AddItemToArray(layouts, newpw);
+			cJSON_AddItemToArray(layouts, qr);
+
+			cJSON *caps = cJSON_CreateObject();
+			cJSON_AddItemToObject(
+				caps, "supportedUiLayouts", layouts);
+
+			cJSON *resp_obj = cJSON_CreateObject();
+			cJSON_AddStringToObject(
+				resp_obj, "type", "uiLayoutCapabilities");
+			cJSON_AddItemToObject(
+				resp_obj, "uiLayoutCapabilities", caps);
+
+			response = cJSON_CreateObject();
+			cJSON_AddStringToObject(
+				response, "type", "response");
+			cJSON_AddItemToObject(
+				response, "response", resp_obj);
+		} else {
+			response = cJSON_CreateObject();
+			cJSON_AddStringToObject(
+				response, "type", "eventAck");
+		}
+
+	} else if (strcmp(type, "event") == 0) {
+		cJSON *event = cJSON_GetObjectItemCaseSensitive(
+			root, "event");
+		cJSON *evt_type = cJSON_GetObjectItemCaseSensitive(
+			event, "type");
+		const char *etype = cJSON_IsString(evt_type)
+			? evt_type->valuestring : "";
+
+		if (strcmp(etype, "brokersReceived") == 0) {
+			cJSON *infos = cJSON_GetObjectItemCaseSensitive(
+				event, "brokersInfos");
+			cJSON *arr = cJSON_CreateArray();
+			cJSON *b;
+			cJSON_ArrayForEach(b, infos) {
+				cJSON *entry = cJSON_CreateObject();
+				cJSON *id =
+					cJSON_GetObjectItemCaseSensitive(
+					b, "id");
+				cJSON *nm =
+					cJSON_GetObjectItemCaseSensitive(
+					b, "name");
+				if (cJSON_IsString(id)) {
+					cJSON_AddStringToObject(entry,
+						"id", id->valuestring);
+				}
+				if (cJSON_IsString(nm)) {
+					cJSON_AddStringToObject(entry,
+						"name", nm->valuestring);
+				}
+				cJSON_AddItemToArray(arr, entry);
+			}
+			char *json = cJSON_PrintUnformatted(arr);
+			cJSON_Delete(arr);
+			if (json) {
+				comm_child_write(COMM_MSG_BROKERS,
+					json, strlen(json));
+				free(json);
+			}
+
+		} else if (strcmp(etype, "authModesReceived") == 0) {
+			cJSON *modes = cJSON_GetObjectItemCaseSensitive(
+				event, "authModes");
+			cJSON *arr = cJSON_CreateArray();
+			cJSON *m;
+			cJSON_ArrayForEach(m, modes) {
+				cJSON *entry = cJSON_CreateObject();
+				cJSON *id =
+					cJSON_GetObjectItemCaseSensitive(
+					m, "id");
+				cJSON *lbl =
+					cJSON_GetObjectItemCaseSensitive(
+					m, "label");
+				if (cJSON_IsString(id)) {
+					cJSON_AddStringToObject(entry,
+						"id", id->valuestring);
+				}
+				if (cJSON_IsString(lbl)) {
+					cJSON_AddStringToObject(entry,
+						"label", lbl->valuestring);
+				}
+				cJSON_AddItemToArray(arr, entry);
+			}
+			char *json = cJSON_PrintUnformatted(arr);
+			cJSON_Delete(arr);
+			if (json) {
+				comm_child_write(COMM_MSG_AUTH_MODES,
+					json, strlen(json));
+				free(json);
+			}
+
+		} else if (strcmp(etype, "uiLayoutReceived") == 0) {
+			cJSON *layout = cJSON_GetObjectItemCaseSensitive(
+				event, "uiLayout");
+			char *json = cJSON_PrintUnformatted(layout);
+			if (json) {
+				comm_child_write(COMM_MSG_UI_LAYOUT,
+					json, strlen(json));
+				free(json);
+			}
+
+		} else if (strcmp(etype, "stageChanged") == 0) {
+			cJSON *stage = cJSON_GetObjectItemCaseSensitive(
+				event, "stage");
+			uint8_t stage_byte = AUTHD_STAGE_NONE;
+			if (cJSON_IsString(stage)) {
+				const char *s = stage->valuestring;
+				if (strcmp(s, "brokerSelection") == 0) {
+					stage_byte = AUTHD_STAGE_BROKER;
+				} else if (strcmp(s,
+						"authModeSelection") == 0) {
+					stage_byte = AUTHD_STAGE_AUTH_MODE;
+				} else if (strcmp(s, "challenge") == 0) {
+					stage_byte = AUTHD_STAGE_CHALLENGE;
+				}
+				/* "userSelection" → AUTHD_STAGE_NONE */
+			}
+			comm_child_write(COMM_MSG_STAGE,
+				(char *)&stage_byte, sizeof(stage_byte));
+
+		} else if (strcmp(etype, "startAuthentication") == 0) {
+			uint8_t stage_byte = AUTHD_STAGE_CHALLENGE;
+			comm_child_write(COMM_MSG_STAGE,
+				(char *)&stage_byte, sizeof(stage_byte));
+
+		} else if (strcmp(etype, "authEvent") == 0) {
+			cJSON *ev_resp =
+				cJSON_GetObjectItemCaseSensitive(
+				event, "response");
+			cJSON *access =
+				cJSON_GetObjectItemCaseSensitive(
+				ev_resp, "access");
+			if (cJSON_IsString(access)) {
+				if (strcmp(access->valuestring,
+						"granted") == 0) {
+					comm_child_write(
+						COMM_MSG_AUTH_RESULT,
+						"\x01", 1);
+				} else if (strcmp(access->valuestring,
+						"denied") == 0) {
+					comm_child_write(
+						COMM_MSG_AUTH_RESULT,
+						"\x00", 1);
+				} else {
+					char *json =
+						cJSON_PrintUnformatted(ev_resp);
+					if (json) {
+						comm_child_write(
+							COMM_MSG_AUTH_EVENT,
+							json, strlen(json));
+						free(json);
+					}
+				}
+			}
+		}
+		/* all event subtypes reply with eventAck */
+		response = cJSON_CreateObject();
+		cJSON_AddStringToObject(response, "type", "eventAck");
+
+	} else if (strcmp(type, "poll") == 0) {
+		if (!state->user_selected_sent) {
+			cJSON *evt = cJSON_CreateObject();
+			cJSON_AddStringToObject(
+				evt, "type", "userSelected");
+			cJSON *sel = cJSON_CreateObject();
+			cJSON_AddStringToObject(
+				sel, "userId", state->username);
+			cJSON_AddItemToObject(evt, "userSelected", sel);
+			state->pending[state->pending_count++] = evt;
+			state->user_selected_sent = true;
+		}
+		while (state->pending_count < 64) {
+			struct pollfd pfd = {
+				.fd     = get_comm_child_fd(),
+				.events = POLLIN,
+			};
+			if (poll(&pfd, 1, 0) <= 0) {
+				break;
+			}
+			char *payload = NULL;
+			size_t plen = 0;
+			int mtype = comm_child_read(&payload, &plen);
+			if (mtype <= 0) {
+				free(payload);
+				break;
+			}
+			cJSON *evt = NULL;
+			switch (mtype) {
+			case COMM_MSG_BROKER_SEL: {
+				evt = cJSON_CreateObject();
+				cJSON_AddStringToObject(
+					evt, "type", "brokerSelected");
+				cJSON *inner = cJSON_CreateObject();
+				cJSON_AddStringToObject(inner, "brokerId",
+					payload ? payload : "");
+				cJSON_AddItemToObject(
+					evt, "brokerSelected", inner);
+				free(payload);
+				break;
+			}
+			case COMM_MSG_AUTH_MODE_SEL: {
+				evt = cJSON_CreateObject();
+				cJSON_AddStringToObject(
+					evt, "type", "authModeSelected");
+				cJSON *inner = cJSON_CreateObject();
+				cJSON_AddStringToObject(inner, "authModeId",
+					payload ? payload : "");
+				cJSON_AddItemToObject(
+					evt, "authModeSelected", inner);
+				free(payload);
+				break;
+			}
+			case COMM_MSG_BUTTON: {
+				evt = cJSON_CreateObject();
+				cJSON_AddStringToObject(evt, "type",
+					"reselectAuthMode");
+				cJSON_AddItemToObject(evt,
+					"reselectAuthMode",
+					cJSON_CreateObject());
+				free(payload);
+				break;
+			}
+			case COMM_MSG_CANCEL: {
+				evt = cJSON_CreateObject();
+				cJSON_AddStringToObject(evt, "type",
+					"isAuthenticatedCancelled");
+				cJSON_AddItemToObject(evt,
+					"isAuthenticatedCancelled",
+					cJSON_CreateObject());
+				free(payload);
+				break;
+			}
+			case COMM_MSG_PASSWORD: {
+				evt = cJSON_CreateObject();
+				cJSON_AddStringToObject(evt, "type",
+					"isAuthenticatedRequested");
+				cJSON *inner = cJSON_CreateObject();
+				cJSON *auth_data = cJSON_CreateObject();
+				cJSON_AddStringToObject(auth_data,
+					"secret", payload ? payload : "");
+				cJSON_AddItemToObject(inner,
+					"authenticationData", auth_data);
+				cJSON_AddItemToObject(evt,
+					"isAuthenticatedRequested", inner);
+				if (payload) {
+					clear_buffer(payload, plen);
+					free(payload);
+				}
+				break;
+			}
+			default:
+				free(payload);
+				break;
+			}
+			if (evt) {
+				state->pending[
+					state->pending_count++] = evt;
+			}
+		}
+		cJSON *arr = cJSON_CreateArray();
+		for (int i = 0; i < state->pending_count; i++) {
+			cJSON_AddItemToArray(arr, state->pending[i]);
+		}
+		state->pending_count = 0;
+		response = cJSON_CreateObject();
+		cJSON_AddStringToObject(
+			response, "type", "pollResponse");
+		cJSON_AddItemToObject(response, "pollResponse", arr);
+
+	} else {
+		response = cJSON_CreateObject();
+		cJSON_AddStringToObject(response, "type", "eventAck");
+	}
+
+	cJSON_Delete(root);
+	if (!response) {
+		return NULL;
+	}
+	char *result = cJSON_PrintUnformatted(response);
+	cJSON_Delete(response);
+	return result;
+}
+
+void initialize_pw_backend(int argc, char **argv) {
+	if (getuid() != geteuid() || getgid() != getegid()) {
+		swaylock_log(LOG_ERROR,
+			"swaylock is setuid, but was compiled with the PAM"
+			" backend. Run 'chmod a-s %s' to fix. Aborting.",
+			argv[0]);
+		exit(EXIT_FAILURE);
+	}
+	if (!spawn_comm_child()) {
+		exit(EXIT_FAILURE);
+	}
+}
+
 void run_pw_backend_child(void) {
-	char *pw_buf = NULL;
+	authd_gdm_advertise_extensions();
 	struct passwd *passwd = getpwuid(getuid());
 	if (!passwd) {
 		swaylock_log_errno(LOG_ERROR, "getpwuid failed");
 		exit(EXIT_FAILURE);
 	}
+	const char *username = passwd->pw_name;
 
-	char *username = passwd->pw_name;
-
-	struct conv_state state = {0};
+	struct conv_state state = {
+		.username = username,
+	};
 	const struct pam_conv conv = {
-		.conv = handle_conversation,
+		.conv        = handle_conversation,
 		.appdata_ptr = &state,
 	};
 	pam_handle_t *auth_handle = NULL;
-	if (pam_start("swaylock", username, &conv, &auth_handle) != PAM_SUCCESS) {
+	if (pam_start("swaylock", username,
+			&conv, &auth_handle) != PAM_SUCCESS) {
 		swaylock_log(LOG_ERROR, "pam_start failed");
 		exit(EXIT_FAILURE);
 	}
+	swaylock_log(LOG_DEBUG,
+		"Prepared to authorize user %s", username);
 
-	/* This code does not run as root */
-	swaylock_log(LOG_DEBUG, "Prepared to authorize user %s", username);
-
-	int pam_status = PAM_SUCCESS;
-	while (1) {
-		ssize_t size = read_comm_request(&pw_buf);
-		if (size < 0) {
-			exit(EXIT_FAILURE);
-		} else if (size == 0) {
-			break;
-		}
-
-		state.password = pw_buf;
-		int pam_status = pam_authenticate(auth_handle, 0);
-		password_buffer_destroy(pw_buf, size);
-		pw_buf = NULL;
-		state.password = NULL;
-
-		bool success = pam_status == PAM_SUCCESS;
-		if (!success) {
-			swaylock_log(LOG_ERROR, "pam_authenticate failed: %s",
+	int pam_status;
+	do {
+		pam_status = pam_authenticate(auth_handle, 0);
+		if (pam_status == PAM_SUCCESS) {
+			comm_child_write(COMM_MSG_AUTH_RESULT, "\x01", 1);
+		} else {
+			swaylock_log(LOG_ERROR,
+				"pam_authenticate failed: %s",
 				get_pam_auth_error(pam_status));
+			comm_child_write(COMM_MSG_AUTH_RESULT, "\x00", 1);
 		}
-
-		if (!write_comm_reply(success)) {
-			exit(EXIT_FAILURE);
-		}
-
-		if (success) {
-			/* Unsuccessful requests may be queued after a successful one;
-			 * do not process them. */
-			break;
-		}
-	}
+	} while (pam_status == PAM_AUTH_ERR);
 
 	pam_setcred(auth_handle, PAM_REFRESH_CRED);
 
@@ -143,6 +556,6 @@ void run_pw_backend_child(void) {
 		swaylock_log(LOG_ERROR, "pam_end failed");
 		exit(EXIT_FAILURE);
 	}
-
-	exit((pam_status == PAM_SUCCESS) ? EXIT_SUCCESS : EXIT_FAILURE);
+	exit((pam_status == PAM_SUCCESS)
+		? EXIT_SUCCESS : EXIT_FAILURE);
 }

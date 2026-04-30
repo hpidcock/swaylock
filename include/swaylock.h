@@ -10,18 +10,18 @@
 
 // Indicator state: status of authentication attempt
 enum auth_state {
-	AUTH_STATE_IDLE, // nothing happening
+	AUTH_STATE_IDLE,       // nothing happening
 	AUTH_STATE_VALIDATING, // currently validating password
-	AUTH_STATE_INVALID, // displaying message: password was wrong
+	AUTH_STATE_INVALID,    // displaying message: password was wrong
 };
 
 // Indicator state: status of password buffer / typing letters
 enum input_state {
-	INPUT_STATE_IDLE, // nothing happening; other states decay to this after time
-	INPUT_STATE_CLEAR, // displaying message: password buffer was cleared
-	INPUT_STATE_LETTER, // pressed a key that input a letter
+	INPUT_STATE_IDLE,      // nothing happening
+	INPUT_STATE_CLEAR,     // displaying message: password buffer was cleared
+	INPUT_STATE_LETTER,    // pressed a key that input a letter
 	INPUT_STATE_BACKSPACE, // pressed backspace and removed a letter
-	INPUT_STATE_NEUTRAL, // pressed a key (like Ctrl) that did nothing
+	INPUT_STATE_NEUTRAL,   // pressed a key (like Ctrl) that did nothing
 };
 
 struct swaylock_colorset {
@@ -60,6 +60,7 @@ struct swaylock_args {
 	bool override_indicator_x_position;
 	bool override_indicator_y_position;
 	bool ignore_empty;
+	bool steal_unlock;
 	bool show_indicator;
 	bool show_caps_lock_text;
 	bool show_caps_lock_indicator;
@@ -77,11 +78,44 @@ struct swaylock_password {
 	char *buffer;
 };
 
+/* authd multi-stage authentication */
+
+enum authd_stage {
+	AUTHD_STAGE_NONE = 0,
+	AUTHD_STAGE_BROKER,
+	AUTHD_STAGE_AUTH_MODE,
+	AUTHD_STAGE_CHALLENGE,
+};
+
+struct authd_broker {
+	char *id;
+	char *name;
+};
+
+struct authd_auth_mode {
+	char *id;
+	char *label;
+};
+
+struct authd_ui_layout {
+	char *type;        /* "form", "qrcode", "newpassword" */
+	char *label;
+	char *button;
+	char *entry;       /* "chars", "chars_password", "digits", "digits_password" */
+	bool  wait;
+	char *qr_content;  /* qrcode: raw content to encode into QR image */
+	char *qr_code;     /* qrcode: human-readable fallback code string */
+};
+
+void authd_ui_layout_clear(struct authd_ui_layout *layout);
+void authd_brokers_free(struct authd_broker *brokers, int count);
+void authd_auth_modes_free(struct authd_auth_mode *modes, int count);
+
 struct swaylock_state {
 	struct loop *eventloop;
-	struct loop_timer *input_idle_timer; // timer to reset input state to IDLE
-	struct loop_timer *auth_idle_timer; // timer to stop displaying AUTH_STATE_INVALID
-	struct loop_timer *clear_password_timer;  // clears the password buffer
+	struct loop_timer *input_idle_timer;   // timer to reset input state to IDLE
+	struct loop_timer *auth_idle_timer;    // timer to stop displaying AUTH_STATE_INVALID
+	struct loop_timer *clear_password_timer; // clears the password buffer
 	struct wl_display *display;
 	struct wl_compositor *compositor;
 	struct wl_subcompositor *subcompositor;
@@ -93,13 +127,28 @@ struct swaylock_state {
 	struct swaylock_xkb xkb;
 	cairo_surface_t *test_surface;
 	cairo_t *test_cairo; // used to estimate font/text sizes
-	enum auth_state auth_state; // state of the authentication attempt
+	enum auth_state auth_state;   // state of the authentication attempt
 	enum input_state input_state; // state of the password buffer and key inputs
-	uint32_t highlight_start; // position of highlight; 2048 = 1 full turn
+	uint32_t highlight_start;     // position of highlight; 2048 = 1 full turn
 	int failed_attempts;
-	bool run_display, locked;
+	bool run_display, locked, lock_failed;
 	struct ext_session_lock_manager_v1 *ext_session_lock_manager_v1;
 	struct ext_session_lock_v1 *ext_session_lock_v1;
+
+	/* authd multi-stage state; only meaningful when authd_active is true */
+	bool authd_active;
+	enum authd_stage authd_stage;
+
+	struct authd_broker *authd_brokers;
+	int authd_num_brokers;
+	int authd_sel_broker;   /* -1 = nothing selected yet */
+
+	struct authd_auth_mode *authd_auth_modes;
+	int authd_num_auth_modes;
+	int authd_sel_auth_mode; /* -1 = nothing selected yet */
+
+	struct authd_ui_layout authd_layout;
+	char *authd_error; /* optional error/info message from the broker */
 };
 
 struct swaylock_surface {
@@ -107,11 +156,16 @@ struct swaylock_surface {
 	struct swaylock_state *state;
 	struct wl_output *output;
 	uint32_t output_global_name;
-	struct wl_surface *surface; // surface for background
-	struct wl_surface *child; // indicator surface made into subsurface
+	struct wl_surface *surface;     // surface for background
+	struct wl_surface *child;       // indicator surface made into subsurface
 	struct wl_subsurface *subsurface;
 	struct ext_session_lock_surface_v1 *ext_session_lock_surface_v1;
 	struct pool_buffer indicator_buffers[2];
+#if HAVE_DEBUG_OVERLAY
+	struct wl_surface *overlay;
+	struct wl_subsurface *overlay_sub;
+	struct pool_buffer overlay_buffers[2];
+#endif
 	bool created;
 	bool dirty;
 	uint32_t width, height;

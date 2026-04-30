@@ -1,15 +1,29 @@
 #include <assert.h>
+#include <errno.h>
 #include <signal.h>
-#include <stdbool.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/types.h>
 #include <unistd.h>
+
 #include "comm.h"
 #include "log.h"
-#include "swaylock.h"
 #include "password-buffer.h"
+#include "swaylock.h"
 
+/*
+ * comm[0]: main→child  (main writes [1], child reads [0])
+ * comm[1]: child→main  (child writes [1], main reads [0])
+ */
 static int comm[2][2] = {{-1, -1}, {-1, -1}};
+
+/*
+ * Returns the fd the child reads incoming messages from.
+ * Not declared in comm.h; pam.c references it via an extern declaration.
+ */
+int get_comm_child_fd(void) {
+	return comm[0][0];
+}
 
 static ssize_t read_full(int fd, void *dst, size_t size) {
 	char *buf = dst;
@@ -26,12 +40,13 @@ static ssize_t read_full(int fd, void *dst, size_t size) {
 			if (offset == 0) {
 				return 0;
 			}
-			swaylock_log(LOG_ERROR, "read() failed: unexpected EOF");
+			swaylock_log(LOG_ERROR,
+				"read() failed: unexpected EOF");
 			return -1;
 		}
 		offset += n;
 	}
-	return offset;
+	return (ssize_t)offset;
 }
 
 static bool write_full(int fd, const void *src, size_t size) {
@@ -52,35 +67,118 @@ static bool write_full(int fd, const void *src, size_t size) {
 	return true;
 }
 
-ssize_t read_comm_request(char **buf_ptr) {
-	int fd = comm[0][0];
-
-	size_t size;
-	ssize_t n = read_full(fd, &size, sizeof(size));
-	if (n <= 0) {
-		return n;
-	}
-	assert(size > 0);
-
-	swaylock_log(LOG_DEBUG, "received pw check request");
-
-	char *buf = password_buffer_create(size);
-	if (!buf) {
-		return -1;
-	}
-
-	if (read_full(fd, buf, size) <= 0) {
-		swaylock_log_errno(LOG_ERROR, "failed to read pw");
-		return -1;
-	}
-
-	assert(buf[size - 1] == '\0');
-	*buf_ptr = buf;
-	return size;
+/* Read a 4-byte little-endian uint32 from a byte buffer. */
+static uint32_t load_le32(const uint8_t *b) {
+	return (uint32_t)b[0]
+		| ((uint32_t)b[1] << 8)
+		| ((uint32_t)b[2] << 16)
+		| ((uint32_t)b[3] << 24);
 }
 
-bool write_comm_reply(bool success) {
-	return write_full(comm[1][1], &success, sizeof(success));
+/* Write a 4-byte little-endian uint32 into a byte buffer. */
+static void store_le32(uint8_t *b, uint32_t v) {
+	b[0] = (uint8_t)(v & 0xff);
+	b[1] = (uint8_t)((v >> 8)  & 0xff);
+	b[2] = (uint8_t)((v >> 16) & 0xff);
+	b[3] = (uint8_t)((v >> 24) & 0xff);
+}
+
+/*
+ * Frame layout: uint8_t type | uint32_t payload_len (LE) | payload[plen]
+ *
+ * Returns message type (>0) on success, 0 on EOF, -1 on error.
+ * On success *payload is malloc'd (caller must free) and *len is set.
+ * On EOF/error *payload is set to NULL.
+ */
+static int comm_read(int fd, char **payload, size_t *len) {
+	uint8_t type;
+	ssize_t n = read_full(fd, &type, sizeof(type));
+	if (n <= 0) {
+		*payload = NULL;
+		return (int)n;
+	}
+
+	uint8_t plen_buf[4];
+	n = read_full(fd, plen_buf, sizeof(plen_buf));
+	if (n <= 0) {
+		*payload = NULL;
+		return -1;
+	}
+
+	uint32_t plen = load_le32(plen_buf);
+	char *buf = NULL;
+	if (plen > 0) {
+		buf = malloc(plen);
+		if (!buf) {
+			swaylock_log(LOG_ERROR, "allocation failed");
+			*payload = NULL;
+			return -1;
+		}
+		n = read_full(fd, buf, plen);
+		if (n <= 0) {
+			free(buf);
+			*payload = NULL;
+			return -1;
+		}
+	}
+
+	*payload = buf;
+	*len = plen;
+	return (int)type;
+}
+
+static bool comm_write(
+	int fd, uint8_t type, const char *payload, size_t len)
+{
+	if (!write_full(fd, &type, sizeof(type))) {
+		return false;
+	}
+	uint8_t plen_buf[4];
+	store_le32(plen_buf, (uint32_t)len);
+	if (!write_full(fd, plen_buf, sizeof(plen_buf))) {
+		return false;
+	}
+	if (len > 0 && payload) {
+		if (!write_full(fd, payload, len)) {
+			return false;
+		}
+	}
+	return true;
+}
+
+int comm_child_read(char **payload, size_t *len) {
+	return comm_read(comm[0][0], payload, len);
+}
+
+bool comm_child_write(uint8_t type, const char *payload, size_t len) {
+	return comm_write(comm[1][1], type, payload, len);
+}
+
+int comm_main_read(char **payload, size_t *len) {
+	return comm_read(comm[1][0], payload, len);
+}
+
+bool comm_main_write(uint8_t type, const char *payload, size_t len) {
+	return comm_write(comm[0][1], type, payload, len);
+}
+
+int get_comm_reply_fd(void) {
+	return comm[1][0];
+}
+
+bool write_comm_password(struct swaylock_password *pw) {
+	size_t size = pw->len + 1;
+	char *copy = password_buffer_create(size);
+	if (!copy) {
+		clear_password_buffer(pw);
+		return false;
+	}
+	memcpy(copy, pw->buffer, size);
+	clear_password_buffer(pw);
+	bool ok = comm_main_write(COMM_MSG_PASSWORD, copy, size);
+	/* password_buffer_destroy zeros the memory before freeing */
+	password_buffer_destroy(copy, size);
+	return ok;
 }
 
 bool spawn_comm_child(void) {
@@ -104,42 +202,10 @@ bool spawn_comm_child(void) {
 		close(comm[0][1]);
 		close(comm[1][0]);
 		run_pw_backend_child();
+		/* run_pw_backend_child calls exit(); unreachable */
+		abort();
 	}
 	close(comm[0][0]);
 	close(comm[1][1]);
 	return true;
-}
-
-bool write_comm_request(struct swaylock_password *pw) {
-	bool result = false;
-	int fd = comm[0][1];
-
-	size_t size = pw->len + 1;
-	if (!write_full(fd, &size, sizeof(size))) {
-		swaylock_log_errno(LOG_ERROR, "Failed to write pw size");
-		goto out;
-	}
-
-	if (!write_full(fd, pw->buffer, size)) {
-		swaylock_log_errno(LOG_ERROR, "Failed to write pw buffer");
-		goto out;
-	}
-
-	result = true;
-
-out:
-	clear_password_buffer(pw);
-	return result;
-}
-
-bool read_comm_reply(bool *auth_success) {
-	if (read_full(comm[1][0], auth_success, sizeof(*auth_success)) <= 0) {
-		swaylock_log(LOG_ERROR, "Failed to read pw result");
-		return false;
-	}
-	return true;
-}
-
-int get_comm_reply_fd(void) {
-	return comm[1][0];
 }

@@ -34,6 +34,8 @@ xkbcommon = dependency('xkbcommon')
 cairo = dependency('cairo')
 gdk_pixbuf = dependency('gdk-pixbuf-2.0', required: get_option('gdk-pixbuf'))
 libpam = cc.find_library('pam', required: get_option('pam'))
+cjson = dependency('libcjson', required: get_option('pam'))
+qrencode = dependency('libqrencode', required: false)
 crypt = cc.find_library('crypt', required: not libpam.found())
 math = cc.find_library('m')
 rt = cc.find_library('rt')
@@ -79,11 +81,15 @@ conf_data = configuration_data()
 conf_data.set_quoted('SYSCONFDIR', get_option('prefix') / get_option('sysconfdir'))
 conf_data.set_quoted('SWAYLOCK_VERSION', version)
 conf_data.set10('HAVE_GDK_PIXBUF', gdk_pixbuf.found())
+conf_data.set10('HAVE_QRENCODE', qrencode.found())
+conf_data.set10('HAVE_DEBUG_OVERLAY', get_option('debug-overlay'))
+conf_data.set10('HAVE_DEBUG_UNLOCK_ON_CRASH', get_option('debug-unlock-on-crash'))
 
 subdir('include')
 
 dependencies = [
 	cairo,
+	cjson,
 	gdk_pixbuf,
 	math,
 	rt,
@@ -108,7 +114,10 @@ sources = [
 
 if libpam.found()
 	sources += ['pam.c']
-	dependencies += [libpam]
+	dependencies += [libpam, cjson]
+	if qrencode.found()
+		dependencies += [qrencode]
+	endif
 else
 	warning('The swaylock binary often needs to be setuid when compiled without libpam')
 	warning('You must do this manually post-install: chmod a+s /path/to/swaylock')

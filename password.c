@@ -1,6 +1,7 @@
 #include <assert.h>
 #include <errno.h>
 #include <pwd.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -94,15 +95,17 @@ static void clear_password(void *data) {
 
 static void schedule_password_clear(struct swaylock_state *state) {
 	if (state->clear_password_timer) {
-		loop_remove_timer(state->eventloop, state->clear_password_timer);
+		loop_remove_timer(
+			state->eventloop, state->clear_password_timer);
 	}
 	state->clear_password_timer = loop_add_timer(
-			state->eventloop, 10000, clear_password, state);
+		state->eventloop, 10000, clear_password, state);
 }
 
 static void cancel_password_clear(struct swaylock_state *state) {
 	if (state->clear_password_timer) {
-		loop_remove_timer(state->eventloop, state->clear_password_timer);
+		loop_remove_timer(
+			state->eventloop, state->clear_password_timer);
 		state->clear_password_timer = NULL;
 	}
 }
@@ -120,7 +123,7 @@ static void submit_password(struct swaylock_state *state) {
 	cancel_password_clear(state);
 	cancel_input_idle(state);
 
-	if (!write_comm_request(&state->password)) {
+	if (!write_comm_password(&state->password)) {
 		state->auth_state = AUTH_STATE_INVALID;
 		schedule_auth_idle(state);
 	}
@@ -137,6 +140,78 @@ static void update_highlight(struct swaylock_state *state) {
 void swaylock_handle_key(struct swaylock_state *state,
 		xkb_keysym_t keysym, uint32_t codepoint) {
 
+	/* In broker or auth-mode selection, Up/Down navigate the list and
+	 * Enter confirms. Tab presses the optional button. */
+	if (state->authd_active) {
+		if (state->authd_stage == AUTHD_STAGE_BROKER ||
+				state->authd_stage == AUTHD_STAGE_AUTH_MODE) {
+			bool is_broker =
+				state->authd_stage == AUTHD_STAGE_BROKER;
+			if (keysym == XKB_KEY_Up) {
+				if (is_broker) {
+					if (state->authd_sel_broker > 0) {
+						--state->authd_sel_broker;
+					}
+				} else {
+					if (state->authd_sel_auth_mode > 0) {
+						--state->authd_sel_auth_mode;
+					}
+				}
+				damage_state(state);
+				return;
+			} else if (keysym == XKB_KEY_Down) {
+				if (is_broker) {
+					if (state->authd_sel_broker <
+							state->authd_num_brokers - 1) {
+						++state->authd_sel_broker;
+					}
+				} else {
+					if (state->authd_sel_auth_mode <
+							state->authd_num_auth_modes - 1) {
+						++state->authd_sel_auth_mode;
+					}
+				}
+				damage_state(state);
+				return;
+			} else if (keysym == XKB_KEY_Return ||
+					keysym == XKB_KEY_KP_Enter) {
+				if (is_broker) {
+					int sel = state->authd_sel_broker;
+					if (sel >= 0 &&
+							sel < state->authd_num_brokers) {
+						const char *id =
+							state->authd_brokers[sel].id;
+						comm_main_write(
+							COMM_MSG_BROKER_SEL,
+							id, strlen(id) + 1);
+					}
+				} else {
+					int sel = state->authd_sel_auth_mode;
+					if (sel >= 0 &&
+							sel < state->authd_num_auth_modes) {
+						const char *id =
+							state->authd_auth_modes[sel].id;
+						comm_main_write(
+							COMM_MSG_AUTH_MODE_SEL,
+							id, strlen(id) + 1);
+					}
+				}
+				return;
+			} else if (keysym == XKB_KEY_Escape) {
+				comm_main_write(COMM_MSG_CANCEL, NULL, 0);
+				return;
+			}
+		}
+		if (state->authd_stage == AUTHD_STAGE_CHALLENGE) {
+			if (keysym == XKB_KEY_Tab &&
+					state->authd_layout.button != NULL) {
+				comm_main_write(COMM_MSG_BUTTON, NULL, 0);
+				damage_state(state);
+				return;
+			}
+		}
+	}
+
 	switch (keysym) {
 	case XKB_KEY_KP_Enter: /* fallthrough */
 	case XKB_KEY_Return:
@@ -149,7 +224,8 @@ void swaylock_handle_key(struct swaylock_state *state,
 			state->input_state = INPUT_STATE_CLEAR;
 			cancel_password_clear(state);
 		} else {
-			if (backspace(&state->password) && state->password.len != 0) {
+			if (backspace(&state->password) &&
+					state->password.len != 0) {
 				state->input_state = INPUT_STATE_BACKSPACE;
 				schedule_password_clear(state);
 				update_highlight(state);

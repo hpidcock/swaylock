@@ -6,6 +6,7 @@
 #include <poll.h>
 #include <signal.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -15,6 +16,7 @@
 #include <unistd.h>
 #include <wayland-client.h>
 #include <wordexp.h>
+#include <cjson/cJSON.h>
 #include "background-image.h"
 #include "cairo.h"
 #include "comm.h"
@@ -110,6 +112,16 @@ static void destroy_surface(struct swaylock_surface *surface) {
 	}
 	destroy_buffer(&surface->indicator_buffers[0]);
 	destroy_buffer(&surface->indicator_buffers[1]);
+#if HAVE_DEBUG_OVERLAY
+	if (surface->overlay_sub) {
+		wl_subsurface_destroy(surface->overlay_sub);
+	}
+	if (surface->overlay) {
+		wl_surface_destroy(surface->overlay);
+	}
+	destroy_buffer(&surface->overlay_buffers[0]);
+	destroy_buffer(&surface->overlay_buffers[1]);
+#endif
 	wl_output_release(surface->output);
 	free(surface);
 }
@@ -139,6 +151,15 @@ static void create_surface(struct swaylock_surface *surface) {
 	surface->subsurface = wl_subcompositor_get_subsurface(state->subcompositor, surface->child, surface->surface);
 	assert(surface->subsurface);
 	wl_subsurface_set_sync(surface->subsurface);
+
+#if HAVE_DEBUG_OVERLAY
+	surface->overlay = wl_compositor_create_surface(state->compositor);
+	assert(surface->overlay);
+	surface->overlay_sub = wl_subcompositor_get_subsurface(
+		state->subcompositor, surface->overlay, surface->surface);
+	assert(surface->overlay_sub);
+	wl_subsurface_set_desync(surface->overlay_sub);
+#endif
 
 	surface->ext_session_lock_surface_v1 = ext_session_lock_v1_get_lock_surface(
 		state->ext_session_lock_v1, surface->surface, surface->output);
@@ -241,6 +262,11 @@ static void ext_session_lock_v1_handle_locked(void *data, struct ext_session_loc
 }
 
 static void ext_session_lock_v1_handle_finished(void *data, struct ext_session_lock_v1 *lock) {
+	struct swaylock_state *state = data;
+	if (state->args.steal_unlock) {
+		state->lock_failed = true;
+		return;
+	}
 	swaylock_log(LOG_ERROR, "Failed to lock session -- "
 			"is another lockscreen running?");
 	exit(2);
@@ -307,6 +333,33 @@ static int sigusr_fds[2] = {-1, -1};
 void do_sigusr(int sig) {
 	(void)write(sigusr_fds[1], "1", 1);
 }
+
+#if HAVE_DEBUG_UNLOCK_ON_CRASH
+static struct swaylock_state state;
+/*
+ * Best-effort unlock on a fatal signal.  Calling non-async-signal-safe
+ * functions (Wayland IPC) from a signal handler is undefined behaviour,
+ * but for a debug build the trade-off is acceptable: a locked screen
+ * that can never be unlocked is far worse than a slightly dirty exit.
+ *
+ * SA_RESETHAND ensures the default handler is restored before we
+ * re-raise, so the process still crashes (and produces a core dump)
+ * after the unlock attempt.
+ */
+static void debug_unlock_on_exit(void) {
+	if (state.ext_session_lock_v1) {
+		ext_session_lock_v1_unlock_and_destroy(state.ext_session_lock_v1);
+		state.ext_session_lock_v1 = NULL;
+		if (state.display) {
+			wl_display_flush(state.display);
+		}
+	}
+}
+static void debug_unlock_on_crash(int sig) {
+	debug_unlock_on_exit();
+	raise(sig);
+}
+#endif
 
 static cairo_surface_t *select_image(struct swaylock_state *state,
 		struct swaylock_surface *surface) {
@@ -483,6 +536,7 @@ static int parse_options(int argc, char **argv, struct swaylock_state *state,
 		LO_TEXT_CAPS_LOCK_COLOR,
 		LO_TEXT_VER_COLOR,
 		LO_TEXT_WRONG_COLOR,
+		LO_STEAL_UNLOCK,
 	};
 
 	static struct option long_options[] = {
@@ -540,6 +594,7 @@ static int parse_options(int argc, char **argv, struct swaylock_state *state,
 		{"text-caps-lock-color", required_argument, NULL, LO_TEXT_CAPS_LOCK_COLOR},
 		{"text-ver-color", required_argument, NULL, LO_TEXT_VER_COLOR},
 		{"text-wrong-color", required_argument, NULL, LO_TEXT_WRONG_COLOR},
+		{"steal-unlock", no_argument, NULL, LO_STEAL_UNLOCK},
 		{0, 0, 0, 0}
 	};
 
@@ -580,6 +635,10 @@ static int parse_options(int argc, char **argv, struct swaylock_state *state,
 			"Disable the unlock indicator.\n"
 		"  -v, --version                    "
 			"Show the version number and quit.\n"
+		"  --steal-unlock                   "
+			"Attempt to unlock a session left locked by a crashed\n"
+			"                               "
+			"swaylock instance, then exit.\n"
 		"  --bs-hl-color <color>            "
 			"Sets the color of backspace highlight segments.\n"
 		"  --caps-lock-bs-hl-color <color>  "
@@ -943,6 +1002,11 @@ static int parse_options(int argc, char **argv, struct swaylock_state *state,
 				state->args.colors.text.wrong = parse_color(optarg);
 			}
 			break;
+		case LO_STEAL_UNLOCK:
+			if (state) {
+				state->args.steal_unlock = true;
+			}
+			break;
 		default:
 			fprintf(stderr, "%s", usage);
 			return 1;
@@ -1037,13 +1101,36 @@ static void display_in(int fd, short mask, void *data) {
 }
 
 static void comm_in(int fd, short mask, void *data) {
-	if (mask & POLLIN) {
-		bool auth_success = false;
-		if (!read_comm_reply(&auth_success)) {
+	if (mask & POLLERR) {
+		swaylock_log(LOG_ERROR,
+			"Password checking subprocess crashed; exiting.");
+		exit(EXIT_FAILURE);
+	}
+	if (!(mask & POLLIN)) {
+		if (mask & POLLHUP) {
+			swaylock_log(LOG_ERROR,
+				"Password checking subprocess "
+				"exited unexpectedly; exiting.");
 			exit(EXIT_FAILURE);
 		}
-		if (auth_success) {
-			// Authentication succeeded
+		return;
+	}
+
+	char *payload = NULL;
+	size_t len = 0;
+	int type = comm_main_read(&payload, &len);
+	if (type <= 0) {
+		if (type == 0) {
+			/* child exited cleanly */
+			exit(EXIT_FAILURE);
+		}
+		swaylock_log(LOG_ERROR, "comm_main_read failed; exiting.");
+		exit(EXIT_FAILURE);
+	}
+
+	switch (type) {
+	case COMM_MSG_AUTH_RESULT:
+		if (len >= 1 && payload[0] == 0x01) {
 			state.run_display = false;
 		} else {
 			state.auth_state = AUTH_STATE_INVALID;
@@ -1051,10 +1138,153 @@ static void comm_in(int fd, short mask, void *data) {
 			++state.failed_attempts;
 			damage_state(&state);
 		}
-	} else if (mask & (POLLHUP | POLLERR)) {
-		swaylock_log(LOG_ERROR,	"Password checking subprocess crashed; exiting.");
-		exit(EXIT_FAILURE);
+		break;
+
+	case COMM_MSG_BROKERS:
+		/* parse JSON array [{id,name},...] */
+		authd_brokers_free(
+			state.authd_brokers, state.authd_num_brokers);
+		state.authd_brokers = NULL;
+		state.authd_num_brokers = 0;
+		state.authd_sel_broker = 0;
+		{
+			cJSON *arr = cJSON_Parse(payload);
+			if (arr && cJSON_IsArray(arr)) {
+				int n = cJSON_GetArraySize(arr);
+				state.authd_brokers = calloc(
+					n, sizeof(*state.authd_brokers));
+				state.authd_num_brokers = n;
+				for (int i = 0; i < n; i++) {
+					cJSON *item =
+						cJSON_GetArrayItem(arr, i);
+					cJSON *id =
+						cJSON_GetObjectItem(item, "id");
+					cJSON *name =
+						cJSON_GetObjectItem(item, "name");
+					if (id && cJSON_IsString(id))
+						state.authd_brokers[i].id =
+							strdup(id->valuestring);
+					if (name && cJSON_IsString(name))
+						state.authd_brokers[i].name =
+							strdup(name->valuestring);
+				}
+			}
+			cJSON_Delete(arr);
+		}
+		state.authd_active = true;
+		state.authd_stage = AUTHD_STAGE_BROKER;
+		damage_state(&state);
+		break;
+
+	case COMM_MSG_AUTH_MODES:
+		/* parse [{id,label},...] */
+		authd_auth_modes_free(
+			state.authd_auth_modes, state.authd_num_auth_modes);
+		state.authd_auth_modes = NULL;
+		state.authd_num_auth_modes = 0;
+		state.authd_sel_auth_mode = 0;
+		{
+			cJSON *arr = cJSON_Parse(payload);
+			if (arr && cJSON_IsArray(arr)) {
+				int n = cJSON_GetArraySize(arr);
+				state.authd_auth_modes = calloc(
+					n, sizeof(*state.authd_auth_modes));
+				state.authd_num_auth_modes = n;
+				for (int i = 0; i < n; i++) {
+					cJSON *item =
+						cJSON_GetArrayItem(arr, i);
+					cJSON *id =
+						cJSON_GetObjectItem(item, "id");
+					cJSON *label =
+						cJSON_GetObjectItem(item, "label");
+					if (id && cJSON_IsString(id))
+						state.authd_auth_modes[i].id =
+							strdup(id->valuestring);
+					if (label && cJSON_IsString(label))
+						state.authd_auth_modes[i].label =
+							strdup(label->valuestring);
+				}
+			}
+			cJSON_Delete(arr);
+		}
+		state.authd_active = true;
+		state.authd_stage = AUTHD_STAGE_AUTH_MODE;
+		damage_state(&state);
+		break;
+
+	case COMM_MSG_UI_LAYOUT:
+		/* parse UILayout JSON object */
+		authd_ui_layout_clear(&state.authd_layout);
+		free(state.authd_error);
+		state.authd_error = NULL;
+		{
+			cJSON *obj = cJSON_Parse(payload);
+			if (obj) {
+				cJSON *t =
+					cJSON_GetObjectItem(obj, "type");
+				cJSON *lbl =
+					cJSON_GetObjectItem(obj, "label");
+				cJSON *btn =
+					cJSON_GetObjectItem(obj, "button");
+				cJSON *ent =
+					cJSON_GetObjectItem(obj, "entry");
+				cJSON *wait =
+					cJSON_GetObjectItem(obj, "wait");
+				cJSON *content =
+					cJSON_GetObjectItem(obj, "content");
+				cJSON *code =
+					cJSON_GetObjectItem(obj, "code");
+#define CSTR(x) (cJSON_IsString(x) ? strdup((x)->valuestring) : NULL)
+				state.authd_layout.type    = CSTR(t);
+				state.authd_layout.label   = CSTR(lbl);
+				state.authd_layout.button  = CSTR(btn);
+				state.authd_layout.entry   = CSTR(ent);
+				state.authd_layout.wait    =
+					wait && cJSON_IsString(wait) &&
+					strcmp(wait->valuestring, "true") == 0;
+				state.authd_layout.qr_content = CSTR(content);
+				state.authd_layout.qr_code    = CSTR(code);
+#undef CSTR
+				cJSON_Delete(obj);
+			}
+		}
+		state.authd_stage = AUTHD_STAGE_CHALLENGE;
+		damage_state(&state);
+		break;
+
+	case COMM_MSG_STAGE:
+		if (len >= 1) {
+			state.authd_stage =
+				(enum authd_stage)((uint8_t)payload[0]);
+			damage_state(&state);
+		}
+		break;
+
+	case COMM_MSG_AUTH_EVENT:
+		/* intermediate result — show as error/info */
+		free(state.authd_error);
+		state.authd_error = NULL;
+		{
+			cJSON *obj = cJSON_Parse(payload);
+			if (obj) {
+				cJSON *msg =
+					cJSON_GetObjectItem(obj, "msg");
+				if (msg && cJSON_IsString(msg))
+					state.authd_error =
+						strdup(msg->valuestring);
+				cJSON_Delete(obj);
+			}
+		}
+		/* reset auth indicator */
+		state.auth_state = AUTH_STATE_IDLE;
+		damage_state(&state);
+		break;
+
+	default:
+		break;
 	}
+
+	free(payload);
 }
 
 static void term_in(int fd, short mask, void *data) {
@@ -1094,6 +1324,16 @@ int main(int argc, char **argv) {
 
 	enum line_mode line_mode = LM_LINE;
 	state.failed_attempts = 0;
+	state.authd_active = false;
+	state.authd_stage = AUTHD_STAGE_NONE;
+	state.authd_brokers = NULL;
+	state.authd_num_brokers = 0;
+	state.authd_sel_broker = -1;
+	state.authd_auth_modes = NULL;
+	state.authd_num_auth_modes = 0;
+	state.authd_sel_auth_mode = -1;
+	memset(&state.authd_layout, 0, sizeof(state.authd_layout));
+	state.authd_error = NULL;
 	state.args = (struct swaylock_args){
 		.mode = BACKGROUND_MODE_FILL,
 		.font = strdup("sans-serif"),
@@ -1208,6 +1448,33 @@ int main(int argc, char **argv) {
 		return 1;
 	}
 
+	if (state.args.steal_unlock) {
+		/* Attempt to acquire the lock so we can immediately release it,
+		 * recovering a session left locked by a crashed swaylock.
+		 * This only works if the compositor has already cleaned up the
+		 * previous locker's connection; if another locker is still
+		 * running the compositor will send a finished event instead and
+		 * we exit with an error. */
+		state.ext_session_lock_v1 = ext_session_lock_manager_v1_lock(
+			state.ext_session_lock_manager_v1);
+		ext_session_lock_v1_add_listener(state.ext_session_lock_v1,
+			&ext_session_lock_v1_listener, &state);
+		while (!state.locked && !state.lock_failed) {
+			if (wl_display_dispatch(state.display) < 0) {
+				swaylock_log(LOG_ERROR, "wl_display_dispatch() failed");
+				return 1;
+			}
+		}
+		if (!state.locked) {
+			swaylock_log(LOG_ERROR, "Compositor refused the lock; "
+				"another locker may still be connected.");
+			return 1;
+		}
+		ext_session_lock_v1_unlock_and_destroy(state.ext_session_lock_v1);
+		wl_display_roundtrip(state.display);
+		return 0;
+	}
+
 	state.ext_session_lock_v1 = ext_session_lock_manager_v1_lock(state.ext_session_lock_manager_v1);
 	ext_session_lock_v1_add_listener(state.ext_session_lock_v1,
 		&ext_session_lock_v1_listener, &state);
@@ -1257,6 +1524,19 @@ int main(int argc, char **argv) {
 	sa.sa_flags = SA_RESTART;
 	sigaction(SIGUSR1, &sa, NULL);
 
+#if HAVE_DEBUG_UNLOCK_ON_CRASH
+	struct sigaction crash_sa;
+	crash_sa.sa_handler = debug_unlock_on_crash;
+	sigemptyset(&crash_sa.sa_mask);
+	crash_sa.sa_flags = SA_RESETHAND;
+	sigaction(SIGSEGV, &crash_sa, NULL);
+	sigaction(SIGABRT, &crash_sa, NULL);
+	sigaction(SIGBUS,  &crash_sa, NULL);
+	sigaction(SIGILL,  &crash_sa, NULL);
+	sigaction(SIGFPE,  &crash_sa, NULL);
+	atexit(debug_unlock_on_exit);
+#endif
+
 	state.run_display = true;
 	while (state.run_display) {
 		errno = 0;
@@ -1267,6 +1547,7 @@ int main(int argc, char **argv) {
 	}
 
 	ext_session_lock_v1_unlock_and_destroy(state.ext_session_lock_v1);
+	state.ext_session_lock_v1 = NULL;
 	wl_display_roundtrip(state.display);
 
 	free(state.args.font);
