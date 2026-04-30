@@ -1248,6 +1248,10 @@ static void comm_in(int fd, short mask, void *data) {
 				cJSON_Delete(obj);
 			}
 		}
+		/* A new UI layout means authd has moved on from the
+		 * previous input — clear any lingering "Verifying"
+		 * indicator so the user can interact with the new UI. */
+		state.auth_state = AUTH_STATE_IDLE;
 		state.authd_stage = AUTHD_STAGE_CHALLENGE;
 		damage_state(&state);
 		break;
