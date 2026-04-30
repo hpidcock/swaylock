@@ -82,10 +82,11 @@ static void render_debug_overlay(struct swaylock_surface *surface) {
 
 	double pad = 4.0 * surface->scale;
 	int line_h = (int)ceil(fe.height + pad);
+
+	/* Buffer covers the full output so the overlay can be positioned
+	 * at (0,0) and lines can be anchored to the bottom edge. */
 	int buf_w = surface->width * surface->scale;
-	int buf_h = line_h * count;
-	int s = surface->scale;
-	buf_h = (buf_h + s - 1) / s * s;
+	int buf_h = surface->height * surface->scale;
 
 	struct pool_buffer *buf = get_next_buffer(
 		state->shm, surface->overlay_buffers, buf_w, buf_h);
@@ -93,15 +94,32 @@ static void render_debug_overlay(struct swaylock_surface *surface) {
 		return;
 	}
 
+	/* How many lines fit; show the most recent ones. */
+	int max_lines = line_h > 0 ? buf_h / line_h : 0;
+	if (max_lines <= 0) {
+		return;
+	}
+	int show = count < max_lines ? count : max_lines;
+	int start = count - show;
+
 	cairo_t *cr = buf->cairo;
 	cairo_identity_matrix(cr);
 	cairo_set_antialias(cr, CAIRO_ANTIALIAS_BEST);
 
-	/* Semi-transparent black background. */
-	cairo_set_source_rgba(cr, 0.0, 0.0, 0.0, 0.75);
+	/* Clear to fully transparent so the background shows through
+	 * above the log lines. */
+	cairo_set_source_rgba(cr, 0.0, 0.0, 0.0, 0.0);
 	cairo_set_operator(cr, CAIRO_OPERATOR_SOURCE);
 	cairo_paint(cr);
 	cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
+
+	/* Semi-transparent band only behind the visible log lines,
+	 * anchored to the bottom of the buffer. */
+	int text_h = show * line_h;
+	int text_top = buf_h - text_h;
+	cairo_set_source_rgba(cr, 0.0, 0.0, 0.0, 0.75);
+	cairo_rectangle(cr, 0, text_top, buf_w, text_h);
+	cairo_fill(cr);
 
 	cairo_select_font_face(cr, state->args.font,
 		CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
@@ -109,16 +127,15 @@ static void render_debug_overlay(struct swaylock_surface *surface) {
 	cairo_font_extents(cr, &fe);
 	cairo_set_source_rgba(cr, 1.0, 1.0, 1.0, 1.0);
 
-	double y = fe.ascent + pad;
-	for (int i = 0; i < count; i++) {
+	double y = text_top + fe.ascent + pad;
+	for (int i = start; i < count; i++) {
 		cairo_move_to(cr, pad, y);
 		cairo_show_text(cr, lines[i]);
 		y += line_h;
 	}
 
-	/* Position the overlay at the bottom of the output. */
-	int pos_y = (int)(surface->height - buf_h / surface->scale);
-	wl_subsurface_set_position(surface->overlay_sub, 0, pos_y);
+	/* Overlay sits at (0,0) and covers the full output. */
+	wl_subsurface_set_position(surface->overlay_sub, 0, 0);
 
 	wl_surface_set_buffer_scale(surface->overlay, surface->scale);
 	wl_surface_attach(surface->overlay, buf->buffer, 0, 0);

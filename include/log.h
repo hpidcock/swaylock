@@ -50,4 +50,19 @@ const char (*swaylock_log_get_overlay(int *count))[LOG_OVERLAY_LINE_LEN];
 
 #endif /* HAVE_DEBUG_OVERLAY */
 
+#include <assert.h>
+
+#if HAVE_DEBUG_OVERLAY
+/* In debug builds, assertions log the failure but do not abort,
+ * allowing the session to remain unlocked for further debugging. */
+#undef assert
+#define assert(cond) \
+	do { \
+		if (!(cond)) { \
+			swaylock_log(LOG_ERROR, \
+				"assertion failed: %s", #cond); \
+		} \
+	} while(0)
+#endif /* HAVE_DEBUG_OVERLAY */
+
 #endif
