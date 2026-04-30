@@ -1,0 +1,35 @@
+Source: swaylock
+Section: x11
+Priority: optional
+Maintainer: Debian Sway Maintainers <team+sway@tracker.debian.org>
+Build-Depends:
+ debhelper-compat (= 13),
+ meson (>= 0.59),
+ ninja-build,
+ pkgconf,
+ libwayland-dev (>= 1.20),
+ wayland-protocols (>= 1.25),
+ libwayland-bin,
+ libxkbcommon-dev,
+ libcairo2-dev,
+ libgdk-pixbuf-2.0-dev,
+ libpam0g-dev,
+ libcjson-dev,
+ libqrencode-dev,
+ scdoc,
+Standards-Version: 4.7.0
+Homepage: https://github.com/swaywm/swaylock
+Rules-Requires-Root: no
+
+Package: swaylock
+Architecture: any
+Depends:
+ ${shlibs:Depends},
+ ${misc:Depends},
+Description: Screen locker for Wayland compositors
+ swaylock is a screen locking utility for Wayland compositors. It is
+ compatible with any Wayland compositor which implements the
+ ext-session-lock-v1 Wayland protocol.
+ .
+ Features include colour and image backgrounds, scaling modes, and PAM
+ authentication support.

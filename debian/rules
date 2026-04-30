@@ -1,0 +1,17 @@
+#!/usr/bin/make -f
+
+%:
+	dh $@
+
+override_dh_auto_configure:
+	dh_auto_configure -- \
+		-Dpam=enabled \
+		-Dgdk-pixbuf=enabled \
+		-Dman-pages=enabled \
+		-Dzsh-completions=true \
+		-Dbash-completions=true \
+		-Dfish-completions=true
+
+override_dh_fixperms:
+	dh_fixperms -Xswaylock
+	chmod 4755 debian/swaylock/usr/bin/swaylock

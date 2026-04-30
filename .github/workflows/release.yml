@@ -1,0 +1,77 @@
+name: Release
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-deb:
+    name: Build and release deb package
+    runs-on: ubuntu-latest
+    container:
+      image: ubuntu:26.04
+    permissions:
+      contents: write
+
+    steps:
+      - name: Install prerequisites
+        run: |
+          apt-get update -q
+          apt-get install -y --no-install-recommends \
+            ca-certificates \
+            gh \
+            git \
+            software-properties-common
+
+      - name: Enable universe repository
+        run: add-apt-repository --yes universe
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Mark workspace as git safe directory
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Install build dependencies
+        run: |
+          apt-get update -q
+          apt-get install -y --no-install-recommends \
+            build-essential \
+            debhelper \
+            dpkg-dev \
+            fish \
+            libcairo2-dev \
+            libcjson-dev \
+            libgdk-pixbuf-2.0-dev \
+            libpam0g-dev \
+            libqrencode-dev \
+            libwayland-bin \
+            libwayland-dev \
+            libxkbcommon-dev \
+            meson \
+            ninja-build \
+            pkgconf \
+            scdoc \
+            wayland-protocols
+
+      - name: Build package
+        run: dpkg-buildpackage -us -uc -b
+
+      - name: Collect artifacts
+        run: |
+          mkdir -p artifacts
+          mv ../swaylock_*.deb \
+            ../swaylock_*.buildinfo \
+            ../swaylock_*.changes \
+            artifacts/
+
+      - name: Create release and upload artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          short_sha=$(git rev-parse --short HEAD)
+          version=$(dpkg-parsechangelog --show-field Version)
+          gh release create "$short_sha" \
+            --repo "${{ github.repository }}" \
+            --title "${version} (${short_sha})" \
+            --generate-notes \
+            artifacts/*
