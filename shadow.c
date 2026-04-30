@@ -64,16 +64,20 @@ void initialize_pw_backend(int argc, char **argv) {
 void run_pw_backend_child(void) {
 	assert(encpw != NULL);
 	while (1) {
-		char *buf;
-		ssize_t size = read_comm_request(&buf);
-		if (size < 0) {
+		char *buf = NULL;
+		size_t len = 0;
+		int type = comm_child_read(&buf, &len);
+		if (type < 0) {
 			exit(EXIT_FAILURE);
-		} else if (size == 0) {
+		} else if (type == 0) {
 			break;
+		} else if (type != COMM_MSG_PASSWORD) {
+			free(buf);
+			continue;
 		}
 
 		const char *c = crypt(buf, encpw);
-		password_buffer_destroy(buf, size);
+		password_buffer_destroy(buf, len);
 		buf = NULL;
 
 		if (c == NULL) {
@@ -82,10 +86,14 @@ void run_pw_backend_child(void) {
 		}
 		bool success = strcmp(c, encpw) == 0;
 
-		if (!write_comm_reply(success)) {
+		if (!comm_child_write(COMM_MSG_AUTH_RESULT,
+				success ? "\x01" : "\x00", 1)) {
 			exit(EXIT_FAILURE);
 		}
 
+		if (success) {
+			break;
+		}
 		sleep(2);
 	}
 

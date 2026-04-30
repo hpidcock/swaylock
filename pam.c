@@ -513,7 +513,9 @@ void initialize_pw_backend(int argc, char **argv) {
 }
 
 void run_pw_backend_child(void) {
-	authd_gdm_advertise_extensions();
+	if (access("/run/authd.sock", F_OK) == 0) {
+		authd_gdm_advertise_extensions();
+	}
 	struct passwd *passwd = getpwuid(getuid());
 	if (!passwd) {
 		swaylock_log_errno(LOG_ERROR, "getpwuid failed");
