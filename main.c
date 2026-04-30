@@ -1184,8 +1184,14 @@ static void comm_in(int fd, short mask, void *data) {
 			cJSON *arr = cJSON_Parse(payload);
 			if (arr && cJSON_IsArray(arr)) {
 				int n = cJSON_GetArraySize(arr);
+				if (n > 256)
+					n = 256;
 				state.authd_brokers = calloc(
 					n, sizeof(*state.authd_brokers));
+				if (!state.authd_brokers) {
+					cJSON_Delete(arr);
+					break;
+				}
 				state.authd_num_brokers = n;
 				for (int i = 0; i < n; i++) {
 					cJSON *item =
@@ -1223,8 +1229,14 @@ static void comm_in(int fd, short mask, void *data) {
 			cJSON *arr = cJSON_Parse(payload);
 			if (arr && cJSON_IsArray(arr)) {
 				int n = cJSON_GetArraySize(arr);
+				if (n > 256)
+					n = 256;
 				state.authd_auth_modes = calloc(
 					n, sizeof(*state.authd_auth_modes));
+				if (!state.authd_auth_modes) {
+					cJSON_Delete(arr);
+					break;
+				}
 				state.authd_num_auth_modes = n;
 				for (int i = 0; i < n; i++) {
 					cJSON *item =

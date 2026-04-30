@@ -12,6 +12,9 @@
 #include "password-buffer.h"
 #include "swaylock.h"
 
+/* Maximum payload size accepted from the pipe (1 MiB). */
+#define COMM_MAX_PAYLOAD (1U << 20)
+
 /*
  * comm[0]: main→child  (main writes [1], child reads [0])
  * comm[1]: child→main  (child writes [1], main reads [0])
@@ -108,8 +111,14 @@ static int comm_read(int fd, char **payload, size_t *len) {
 
 	uint32_t plen = load_le32(plen_buf);
 	char *buf = NULL;
+	if (plen > COMM_MAX_PAYLOAD) {
+		swaylock_log(LOG_ERROR,
+			"comm_read: payload too large: %u", plen);
+		*payload = NULL;
+		return -1;
+	}
 	if (plen > 0) {
-		buf = malloc(plen);
+		buf = malloc((size_t)plen + 1);
 		if (!buf) {
 			swaylock_log(LOG_ERROR, "allocation failed");
 			*payload = NULL;
@@ -121,6 +130,7 @@ static int comm_read(int fd, char **payload, size_t *len) {
 			*payload = NULL;
 			return -1;
 		}
+		buf[plen] = '\0';
 	}
 
 	*payload = buf;

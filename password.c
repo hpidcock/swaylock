@@ -191,9 +191,10 @@ void swaylock_handle_key(struct swaylock_state *state,
 							sel < state->authd_num_brokers) {
 						const char *id =
 							state->authd_brokers[sel].id;
-						comm_main_write(
-							COMM_MSG_BROKER_SEL,
-							id, strlen(id) + 1);
+						if (id)
+							comm_main_write(
+								COMM_MSG_BROKER_SEL,
+								id, strlen(id) + 1);
 					}
 				} else {
 					int sel = state->authd_sel_auth_mode;
@@ -201,9 +202,10 @@ void swaylock_handle_key(struct swaylock_state *state,
 							sel < state->authd_num_auth_modes) {
 						const char *id =
 							state->authd_auth_modes[sel].id;
-						comm_main_write(
-							COMM_MSG_AUTH_MODE_SEL,
-							id, strlen(id) + 1);
+						if (id)
+							comm_main_write(
+								COMM_MSG_AUTH_MODE_SEL,
+								id, strlen(id) + 1);
 					}
 				}
 				return;

@@ -385,44 +385,24 @@ static char *handle_gdm_json(
 			cJSON *ev_resp =
 				cJSON_GetObjectItemCaseSensitive(
 				event, "response");
-			cJSON *access =
-				cJSON_GetObjectItemCaseSensitive(
-				ev_resp, "access");
-			if (cJSON_IsString(access)) {
-				swaylock_log(LOG_DEBUG,
-					"handle_gdm_json: authEvent"
-					" access=%s",
-					access->valuestring);
-				if (strcmp(access->valuestring,
-						"granted") == 0) {
+			if (ev_resp) {
+				char *json =
+					cJSON_PrintUnformatted(ev_resp);
+				if (json) {
+					cJSON *access =
+						cJSON_GetObjectItemCaseSensitive(
+						ev_resp, "access");
+					swaylock_log(LOG_DEBUG,
+						"handle_gdm_json: authEvent"
+						" access=%s -> AUTH_EVENT",
+						cJSON_IsString(access)
+							? access->valuestring
+							: "(none)");
 					comm_child_write(
-						COMM_MSG_AUTH_RESULT,
-						"\x01", 1);
-				} else if (strcmp(access->valuestring,
-						"denied") == 0) {
-					comm_child_write(
-						COMM_MSG_AUTH_RESULT,
-						"\x00", 1);
-				} else {
-					char *json =
-						cJSON_PrintUnformatted(ev_resp);
-					if (json) {
-						swaylock_log(LOG_DEBUG,
-							"handle_gdm_json:"
-							" authEvent other"
-							" access, sending"
-							" AUTH_EVENT");
-						comm_child_write(
-							COMM_MSG_AUTH_EVENT,
-							json, strlen(json));
-						free(json);
-					}
+						COMM_MSG_AUTH_EVENT,
+						json, strlen(json));
+					free(json);
 				}
-			} else {
-				swaylock_log(LOG_DEBUG,
-					"handle_gdm_json: authEvent"
-					" missing/non-string access"
-					" field — no message sent");
 			}
 		}
 		/* all event subtypes reply with eventAck */
