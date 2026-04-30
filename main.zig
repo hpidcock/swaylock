@@ -11,35 +11,131 @@ const c = @cImport({
     @cInclude("errno.h");
     @cInclude("fcntl.h");
     @cInclude("getopt.h");
-    @cInclude("poll.h");
     @cInclude("signal.h");
-    @cInclude("stdint.h");
     @cInclude("stdio.h");
     @cInclude("stdlib.h");
     @cInclude("string.h");
     @cInclude("sys/stat.h");
-    @cInclude("time.h");
     @cInclude("unistd.h");
-    @cInclude("wayland-client.h");
     @cInclude("wordexp.h");
-    @cInclude("background-image.h");
-    @cInclude("cairo.h");
-    @cInclude("comm.h");
-    @cInclude("log.h");
-    @cInclude("loop.h");
-    @cInclude("password-buffer.h");
-    @cInclude("pool-buffer.h");
-    @cInclude("seat.h");
-    @cInclude("swaylock.h");
-    @cInclude("ext-session-lock-v1-client-protocol.h");
 });
+
+const types = @import("types");
+const wl = types.c;
+const log_err: c_int = @intFromEnum(types.LogImportance.err);
+const log_info: c_int = @intFromEnum(types.LogImportance.info);
+const log_debug: c_int = @intFromEnum(types.LogImportance.debug);
+
+// Log functions via C ABI (defined in log.zig).
+extern fn _swaylock_log(verbosity: c_int, fmt: [*c]const u8, ...) void;
+extern fn _swaylock_strip_path(
+    filepath: [*c]const u8,
+) [*c]const u8;
+extern fn swaylock_log_init(verbosity: c_int) void;
+
+// Loop functions.
+extern fn loop_create() ?*types.Loop;
+extern fn loop_destroy(loop: *types.Loop) void;
+extern fn loop_poll(loop: *types.Loop) void;
+extern fn loop_add_fd(
+    loop: *types.Loop,
+    fd: c_int,
+    mask: c_short,
+    callback: types.FdCallback,
+    data: ?*anyopaque,
+) void;
+extern fn loop_remove_fd(loop: *types.Loop, fd: c_int) bool;
+extern fn loop_add_timer(
+    loop: *types.Loop,
+    ms: c_int,
+    callback: types.TimerCallback,
+    data: ?*anyopaque,
+) ?*types.LoopTimer;
+extern fn loop_remove_timer(
+    loop: *types.Loop,
+    timer: *types.LoopTimer,
+) bool;
+
+// Pool-buffer functions.
+extern fn get_next_buffer(
+    shm: ?*wl.wl_shm,
+    pool: [*]types.PoolBuffer,
+    width: u32,
+    height: u32,
+) ?*types.PoolBuffer;
+extern fn create_buffer(
+    shm: ?*wl.wl_shm,
+    buf: *types.PoolBuffer,
+    width: i32,
+    height: i32,
+    format: u32,
+) ?*types.PoolBuffer;
+extern fn destroy_buffer(buffer: *types.PoolBuffer) void;
+
+// Cairo helper functions.
+extern fn cairo_set_source_u32(
+    cairo: ?*types.c.cairo_t,
+    color: u32,
+) void;
+extern fn to_cairo_subpixel_order(
+    subpixel: wl.wl_output_subpixel,
+) types.c.cairo_subpixel_order_t;
+
+// Background image functions.
+extern fn parse_background_mode(
+    mode: [*c]const u8,
+) types.BackgroundMode;
+extern fn load_background_image(
+    path: [*c]const u8,
+) ?*types.c.cairo_surface_t;
+
+// Comm functions.
+extern fn spawn_comm_child() bool;
+extern fn comm_main_read(payload: *[*c]u8, len: *usize) c_int;
+extern fn comm_main_write(
+    msg_type: u8,
+    payload: [*c]const u8,
+    len: usize,
+) bool;
+extern fn get_comm_reply_fd() c_int;
+extern fn write_comm_password(pw: *types.SwaylockPassword) bool;
+
+// Password functions.
+extern fn swaylock_handle_key(
+    state: *types.SwaylockState,
+    keysym: wl.xkb_keysym_t,
+    codepoint: u32,
+) void;
+extern fn schedule_auth_idle(state: *types.SwaylockState) void;
+extern fn clear_password_buffer(pw: *types.SwaylockPassword) void;
+extern fn password_buffer_create(size: usize) [*c]u8;
+
+// Render function (defined in render.zig).
+extern fn render(surface: *types.SwaylockSurface) void;
+
+// Seat listener (exported from seat.zig).
+extern var seat_listener: wl.wl_seat_listener;
+
+// PAM/auth backend functions (from pam.zig or shadow.c).
+extern fn initialize_pw_backend(argc: c_int, argv: [*c][*c]u8) void;
+
+// Authd/PAM helpers (from pam.zig).
+extern fn authd_ui_layout_clear(layout: *types.AuthdUiLayout) void;
+extern fn authd_brokers_free(
+    brokers: [*c]types.AuthdBroker,
+    count: c_int,
+) void;
+extern fn authd_auth_modes_free(
+    modes: [*c]types.AuthdAuthMode,
+    count: c_int,
+) void;
 
 // getopt globals not always exposed by @cImport.
 extern var optarg: [*c]u8;
 extern var optind: c_int;
 
 var sigusr_fds: [2]c_int = .{ -1, -1 };
-var state: c.swaylock_state = std.mem.zeroes(c.swaylock_state);
+var state: types.SwaylockState = std.mem.zeroes(types.SwaylockState);
 
 const LineMode = enum { line, inside, ring };
 
@@ -52,20 +148,21 @@ fn slog(
 ) void {
     var buf: [512]u8 = undefined;
     const msg = std.fmt.bufPrintZ(&buf, fmt, args) catch return;
-    c._swaylock_log(
-        @as(c.enum_log_importance, @intCast(verbosity)),
+    _swaylock_log(
+        verbosity,
         "[%s:%d] %s",
-        c._swaylock_strip_path(src.file.ptr),
+        _swaylock_strip_path(src.file.ptr),
         @as(c_int, @intCast(src.line)),
         msg.ptr,
     );
 }
 
 /// Return the struct enclosing a wl_list node pointer.
+/// Accepts any pointer type to avoid cImport-namespace mismatches.
 fn wlEntry(
     comptime T: type,
     comptime field: []const u8,
-    node: *c.wl_list,
+    node: anytype,
 ) *T {
     return @ptrFromInt(@intFromPtr(node) - @offsetOf(T, field));
 }
@@ -83,7 +180,7 @@ fn parseColor(color_in: [*c]const u8) u32 {
     const len = c.strlen(color);
     if (len != 6 and len != 8) {
         slog(
-            c.LOG_DEBUG,
+            log_debug,
             @src(),
             "Invalid color {s}, defaulting to 0xFFFFFFFF",
             .{color},
@@ -105,7 +202,7 @@ fn lenientStrcmp(a: [*c]const u8, b: [*c]const u8) c_int {
 fn daemonize() void {
     var fds: [2]c_int = undefined;
     if (c.pipe(&fds) != 0) {
-        slog(c.LOG_ERROR, @src(), "Failed to pipe", .{});
+        slog(log_err, @src(), "Failed to pipe", .{});
         c.exit(1);
     }
     if (c.fork() == 0) {
@@ -127,7 +224,7 @@ fn daemonize() void {
         _ = c.close(fds[1]);
         var success: u8 = undefined;
         if (c.read(fds[0], &success, 1) != 1 or success == 0) {
-            slog(c.LOG_ERROR, @src(), "Failed to daemonize", .{});
+            slog(log_err, @src(), "Failed to daemonize", .{});
             c.exit(1);
         }
         _ = c.close(fds[0]);
@@ -135,97 +232,97 @@ fn daemonize() void {
     }
 }
 
-fn destroySurface(surface: *c.swaylock_surface) void {
+fn destroySurface(surface: *types.SwaylockSurface) void {
     if (surface.frame != null)
-        c.wl_callback_destroy(surface.frame);
-    c.wl_list_remove(&surface.link);
+        wl.wl_callback_destroy(surface.frame);
+    wl.wl_list_remove(&surface.link);
     if (surface.ext_session_lock_surface_v1 != null) {
-        c.ext_session_lock_surface_v1_destroy(
+        wl.ext_session_lock_surface_v1_destroy(
             surface.ext_session_lock_surface_v1,
         );
     }
     if (surface.subsurface != null)
-        c.wl_subsurface_destroy(surface.subsurface);
+        wl.wl_subsurface_destroy(surface.subsurface);
     if (surface.child != null)
-        c.wl_surface_destroy(surface.child);
+        wl.wl_surface_destroy(surface.child);
     if (surface.surface != null)
-        c.wl_surface_destroy(surface.surface);
-    c.destroy_buffer(&surface.indicator_buffers[0]);
-    c.destroy_buffer(&surface.indicator_buffers[1]);
+        wl.wl_surface_destroy(surface.surface);
+    destroy_buffer(&surface.indicator_buffers[0]);
+    destroy_buffer(&surface.indicator_buffers[1]);
     if (opts.have_debug_overlay) {
         if (surface.overlay_sub != null)
-            c.wl_subsurface_destroy(surface.overlay_sub);
+            wl.wl_subsurface_destroy(surface.overlay_sub);
         if (surface.overlay != null)
-            c.wl_surface_destroy(surface.overlay);
-        c.destroy_buffer(&surface.overlay_buffers[0]);
-        c.destroy_buffer(&surface.overlay_buffers[1]);
+            wl.wl_surface_destroy(surface.overlay);
+        destroy_buffer(&surface.overlay_buffers[0]);
+        destroy_buffer(&surface.overlay_buffers[1]);
     }
-    c.wl_output_release(surface.output);
-    c.free(surface);
+    wl.wl_output_release(surface.output);
+    std.heap.c_allocator.destroy(surface);
 }
 
-fn surfaceIsOpaque(surface: *c.swaylock_surface) bool {
+fn surfaceIsOpaque(surface: *types.SwaylockSurface) bool {
     if (surface.image != null) {
-        return c.cairo_surface_get_content(surface.image) ==
-            c.CAIRO_CONTENT_COLOR;
+        return types.c.cairo_surface_get_content(surface.image) ==
+            types.c.CAIRO_CONTENT_COLOR;
     }
-    return (surface.state.*.args.colors.background & 0xff) == 0xff;
+    return (surface.state.?.args.colors.background & 0xff) == 0xff;
 }
 
-fn createSurface(surface: *c.swaylock_surface) void {
-    const st = surface.state;
+fn createSurface(surface: *types.SwaylockSurface) void {
+    const st = surface.state.?;
     surface.image = selectImage(st, surface);
     surface.surface =
-        c.wl_compositor_create_surface(st.*.compositor);
+        wl.wl_compositor_create_surface(st.compositor);
     std.debug.assert(surface.surface != null);
     surface.child =
-        c.wl_compositor_create_surface(st.*.compositor);
+        wl.wl_compositor_create_surface(st.compositor);
     std.debug.assert(surface.child != null);
-    surface.subsurface = c.wl_subcompositor_get_subsurface(
-        st.*.subcompositor,
+    surface.subsurface = wl.wl_subcompositor_get_subsurface(
+        st.subcompositor,
         surface.child,
         surface.surface,
     );
     std.debug.assert(surface.subsurface != null);
-    c.wl_subsurface_set_sync(surface.subsurface);
+    wl.wl_subsurface_set_sync(surface.subsurface);
     if (opts.have_debug_overlay) {
         surface.overlay =
-            c.wl_compositor_create_surface(st.*.compositor);
+            wl.wl_compositor_create_surface(st.compositor);
         std.debug.assert(surface.overlay != null);
-        surface.overlay_sub = c.wl_subcompositor_get_subsurface(
-            st.*.subcompositor,
+        surface.overlay_sub = wl.wl_subcompositor_get_subsurface(
+            st.subcompositor,
             surface.overlay,
             surface.surface,
         );
         std.debug.assert(surface.overlay_sub != null);
-        c.wl_subsurface_set_desync(surface.overlay_sub);
+        wl.wl_subsurface_set_desync(surface.overlay_sub);
     }
     surface.ext_session_lock_surface_v1 =
-        c.ext_session_lock_v1_get_lock_surface(
-            st.*.ext_session_lock_v1,
+        wl.ext_session_lock_v1_get_lock_surface(
+            st.ext_session_lock_v1,
             surface.surface,
             surface.output,
         );
-    _ = c.ext_session_lock_surface_v1_add_listener(
+    _ = wl.ext_session_lock_surface_v1_add_listener(
         surface.ext_session_lock_surface_v1,
         &ext_session_lock_surface_v1_listener,
         surface,
     );
     if (surfaceIsOpaque(surface) and
-        st.*.args.mode != c.BACKGROUND_MODE_CENTER and
-        st.*.args.mode != c.BACKGROUND_MODE_FIT)
+        st.args.mode != types.BackgroundMode.center and
+        st.args.mode != types.BackgroundMode.fit)
     {
         const region =
-            c.wl_compositor_create_region(st.*.compositor);
-        c.wl_region_add(
+            wl.wl_compositor_create_region(st.compositor);
+        wl.wl_region_add(
             region,
             0,
             0,
             2147483647,
             2147483647,
         );
-        c.wl_surface_set_opaque_region(surface.surface, region);
-        c.wl_region_destroy(region);
+        wl.wl_surface_set_opaque_region(surface.surface, region);
+        wl.wl_region_destroy(region);
     }
     surface.created = true;
 }
@@ -237,37 +334,37 @@ fn extSessionLockSurfaceV1HandleConfigure(
     width: u32,
     height: u32,
 ) callconv(std.builtin.CallingConvention.c) void {
-    const surface: *c.swaylock_surface =
+    const surface: *types.SwaylockSurface =
         @ptrCast(@alignCast(data.?));
     surface.width = width;
     surface.height = height;
-    c.ext_session_lock_surface_v1_ack_configure(
+    wl.ext_session_lock_surface_v1_ack_configure(
         @ptrCast(lock_surface),
         serial,
     );
     surface.dirty = true;
-    c.render(surface);
+    render(surface);
 }
 
-const ext_session_lock_surface_v1_listener: c.struct_ext_session_lock_surface_v1_listener = .{
+const ext_session_lock_surface_v1_listener: wl.struct_ext_session_lock_surface_v1_listener = .{
     .configure = @ptrCast(&extSessionLockSurfaceV1HandleConfigure),
 };
 
-export fn damage_state(st: *c.swaylock_state) void {
-    const head: *c.wl_list = &st.surfaces;
+export fn damage_state(st: *types.SwaylockState) void {
+    const head = &st.surfaces;
     var node = head.next;
     while (node != head) {
         const surface =
-            wlEntry(c.swaylock_surface, "link", node.?);
+            wlEntry(types.SwaylockSurface, "link", node.?);
         node = surface.link.next;
         surface.dirty = true;
-        c.render(surface);
+        render(surface);
     }
 }
 
 fn handleWlOutputGeometry(
     data: ?*anyopaque,
-    output: ?*c.wl_output,
+    output: ?*wl.wl_output,
     x: i32,
     y: i32,
     width_mm: i32,
@@ -285,18 +382,18 @@ fn handleWlOutputGeometry(
     _ = make;
     _ = model;
     _ = transform;
-    const surface: *c.swaylock_surface =
+    const surface: *types.SwaylockSurface =
         @ptrCast(@alignCast(data.?));
     surface.subpixel = @intCast(subpixel);
-    if (surface.state.*.run_display) {
+    if (surface.state.?.run_display) {
         surface.dirty = true;
-        c.render(surface);
+        render(surface);
     }
 }
 
 fn handleWlOutputMode(
     data: ?*anyopaque,
-    output: ?*c.wl_output,
+    output: ?*wl.wl_output,
     flags: u32,
     width: i32,
     height: i32,
@@ -312,44 +409,44 @@ fn handleWlOutputMode(
 
 fn handleWlOutputDone(
     data: ?*anyopaque,
-    output: ?*c.wl_output,
+    output: ?*wl.wl_output,
 ) callconv(std.builtin.CallingConvention.c) void {
     _ = output;
-    const surface: *c.swaylock_surface =
+    const surface: *types.SwaylockSurface =
         @ptrCast(@alignCast(data.?));
-    if (!surface.created and surface.state.*.run_display)
+    if (!surface.created and surface.state.?.run_display)
         createSurface(surface);
 }
 
 fn handleWlOutputScale(
     data: ?*anyopaque,
-    output: ?*c.wl_output,
+    output: ?*wl.wl_output,
     factor: i32,
 ) callconv(std.builtin.CallingConvention.c) void {
     _ = output;
-    const surface: *c.swaylock_surface =
+    const surface: *types.SwaylockSurface =
         @ptrCast(@alignCast(data.?));
     surface.scale = factor;
-    if (surface.state.*.run_display) {
+    if (surface.state.?.run_display) {
         surface.dirty = true;
-        c.render(surface);
+        render(surface);
     }
 }
 
 fn handleWlOutputName(
     data: ?*anyopaque,
-    output: ?*c.wl_output,
+    output: ?*wl.wl_output,
     name: [*c]const u8,
 ) callconv(std.builtin.CallingConvention.c) void {
     _ = output;
-    const surface: *c.swaylock_surface =
+    const surface: *types.SwaylockSurface =
         @ptrCast(@alignCast(data.?));
     surface.output_name = c.strdup(name);
 }
 
 fn handleWlOutputDescription(
     data: ?*anyopaque,
-    output: ?*c.wl_output,
+    output: ?*wl.wl_output,
     description: [*c]const u8,
 ) callconv(std.builtin.CallingConvention.c) void {
     _ = data;
@@ -357,7 +454,7 @@ fn handleWlOutputDescription(
     _ = description;
 }
 
-var wl_output_listener: c.wl_output_listener = .{
+var wl_output_listener: wl.wl_output_listener = .{
     .geometry = handleWlOutputGeometry,
     .mode = handleWlOutputMode,
     .done = handleWlOutputDone,
@@ -371,7 +468,7 @@ fn extSessionLockV1HandleLocked(
     lock: ?*anyopaque,
 ) callconv(std.builtin.CallingConvention.c) void {
     _ = lock;
-    const st: *c.swaylock_state =
+    const st: *types.SwaylockState =
         @ptrCast(@alignCast(data.?));
     st.locked = true;
 }
@@ -381,14 +478,14 @@ fn extSessionLockV1HandleFinished(
     lock: ?*anyopaque,
 ) callconv(std.builtin.CallingConvention.c) void {
     _ = lock;
-    const st: *c.swaylock_state =
+    const st: *types.SwaylockState =
         @ptrCast(@alignCast(data.?));
     if (st.args.steal_unlock) {
         st.lock_failed = true;
         return;
     }
     slog(
-        c.LOG_ERROR,
+        log_err,
         @src(),
         "Failed to lock session -- is another lockscreen running?",
         .{},
@@ -396,89 +493,93 @@ fn extSessionLockV1HandleFinished(
     c.exit(2);
 }
 
-const ext_session_lock_v1_listener: c.struct_ext_session_lock_v1_listener = .{
+const ext_session_lock_v1_listener: wl.struct_ext_session_lock_v1_listener = .{
     .locked = @ptrCast(&extSessionLockV1HandleLocked),
     .finished = @ptrCast(&extSessionLockV1HandleFinished),
 };
 
 fn handleGlobal(
     data: ?*anyopaque,
-    registry: ?*c.wl_registry,
+    registry: ?*wl.wl_registry,
     name: u32,
     interface: [*c]const u8,
     version: u32,
 ) callconv(std.builtin.CallingConvention.c) void {
     _ = version;
-    const st: *c.swaylock_state =
+    const st: *types.SwaylockState =
         @ptrCast(@alignCast(data.?));
-    if (c.strcmp(interface, c.wl_compositor_interface.name) == 0) {
-        st.compositor = @ptrCast(c.wl_registry_bind(
+    if (c.strcmp(interface, wl.wl_compositor_interface.name) == 0) {
+        st.compositor = @ptrCast(wl.wl_registry_bind(
             registry,
             name,
-            &c.wl_compositor_interface,
+            &wl.wl_compositor_interface,
             4,
         ));
     } else if (c.strcmp(
         interface,
-        c.wl_subcompositor_interface.name,
+        wl.wl_subcompositor_interface.name,
     ) == 0) {
-        st.subcompositor = @ptrCast(c.wl_registry_bind(
+        st.subcompositor = @ptrCast(wl.wl_registry_bind(
             registry,
             name,
-            &c.wl_subcompositor_interface,
+            &wl.wl_subcompositor_interface,
             1,
         ));
-    } else if (c.strcmp(interface, c.wl_shm_interface.name) == 0) {
-        st.shm = @ptrCast(c.wl_registry_bind(
+    } else if (c.strcmp(interface, wl.wl_shm_interface.name) == 0) {
+        st.shm = @ptrCast(wl.wl_registry_bind(
             registry,
             name,
-            &c.wl_shm_interface,
+            &wl.wl_shm_interface,
             1,
         ));
-    } else if (c.strcmp(interface, c.wl_seat_interface.name) == 0) {
-        const seat: ?*c.wl_seat = @ptrCast(c.wl_registry_bind(
+    } else if (c.strcmp(interface, wl.wl_seat_interface.name) == 0) {
+        const seat: ?*wl.wl_seat = @ptrCast(wl.wl_registry_bind(
             registry,
             name,
-            &c.wl_seat_interface,
+            &wl.wl_seat_interface,
             4,
         ));
-        const swaylock_seat: *c.swaylock_seat =
-            @ptrCast(@alignCast(
-                c.calloc(1, @sizeOf(c.swaylock_seat)),
-            ));
+        const swaylock_seat = std.heap.c_allocator.create(
+            types.SwaylockSeat,
+        ) catch @panic("OOM");
+        swaylock_seat.* = std.mem.zeroes(types.SwaylockSeat);
         swaylock_seat.state = st;
-        _ = c.wl_seat_add_listener(seat, &c.seat_listener, swaylock_seat);
+        _ = wl.wl_seat_add_listener(
+            seat,
+            &seat_listener,
+            swaylock_seat,
+        );
     } else if (c.strcmp(
         interface,
-        c.wl_output_interface.name,
+        wl.wl_output_interface.name,
     ) == 0) {
-        const surface: *c.swaylock_surface =
-            @ptrCast(@alignCast(
-                c.calloc(1, @sizeOf(c.swaylock_surface)),
-            ));
+        const surface = std.heap.c_allocator.create(
+            types.SwaylockSurface,
+        ) catch @panic("OOM");
+        surface.* = std.mem.zeroes(types.SwaylockSurface);
         surface.state = st;
-        surface.output = @ptrCast(c.wl_registry_bind(
+        surface.output = @ptrCast(wl.wl_registry_bind(
             registry,
             name,
-            &c.wl_output_interface,
+            &wl.wl_output_interface,
             4,
         ));
         surface.output_global_name = name;
-        _ = c.wl_output_add_listener(
+        _ = wl.wl_output_add_listener(
             surface.output,
             &wl_output_listener,
             surface,
         );
-        c.wl_list_insert(&st.surfaces, &surface.link);
+        wl.wl_list_insert(&st.surfaces, &surface.link);
     } else if (c.strcmp(
         interface,
-        c.ext_session_lock_manager_v1_interface.name,
+        wl.ext_session_lock_manager_v1_interface.name,
     ) == 0) {
         st.ext_session_lock_manager_v1 =
-            @ptrCast(c.wl_registry_bind(
+            @ptrCast(wl.wl_registry_bind(
                 registry,
                 name,
-                &c.ext_session_lock_manager_v1_interface,
+                &wl.ext_session_lock_manager_v1_interface,
                 1,
             ));
     }
@@ -486,17 +587,17 @@ fn handleGlobal(
 
 fn handleGlobalRemove(
     data: ?*anyopaque,
-    registry: ?*c.wl_registry,
+    registry: ?*wl.wl_registry,
     name: u32,
 ) callconv(std.builtin.CallingConvention.c) void {
     _ = registry;
-    const st: *c.swaylock_state =
+    const st: *types.SwaylockState =
         @ptrCast(@alignCast(data.?));
-    const head: *c.wl_list = &st.surfaces;
+    const head = &st.surfaces;
     var node = head.next;
     while (node != head) {
         const surface =
-            wlEntry(c.swaylock_surface, "link", node.?);
+            wlEntry(types.SwaylockSurface, "link", node.?);
         node = surface.link.next;
         if (surface.output_global_name == name) {
             destroySurface(surface);
@@ -505,24 +606,26 @@ fn handleGlobalRemove(
     }
 }
 
-const registry_listener: c.wl_registry_listener = .{
+const registry_listener: wl.wl_registry_listener = .{
     .global = handleGlobal,
     .global_remove = handleGlobalRemove,
 };
 
-fn doSigusr(sig: c_int) callconv(std.builtin.CallingConvention.c) void {
+fn doSigusr(
+    sig: c_int,
+) callconv(std.builtin.CallingConvention.c) void {
     _ = sig;
     _ = c.write(sigusr_fds[1], "1", 1);
 }
 
 fn debugUnlockOnExit() callconv(std.builtin.CallingConvention.c) void {
     if (state.ext_session_lock_v1 != null) {
-        c.ext_session_lock_v1_unlock_and_destroy(
+        wl.ext_session_lock_v1_unlock_and_destroy(
             state.ext_session_lock_v1,
         );
         state.ext_session_lock_v1 = null;
         if (state.display != null)
-            _ = c.wl_display_flush(state.display);
+            _ = wl.wl_display_flush(state.display);
     }
 }
 
@@ -534,14 +637,14 @@ fn debugUnlockOnCrash(
 }
 
 fn selectImage(
-    st: *c.swaylock_state,
-    surface: *c.swaylock_surface,
-) ?*c.cairo_surface_t {
-    var default_image: ?*c.cairo_surface_t = null;
-    const head: *c.wl_list = &st.images;
+    st: *types.SwaylockState,
+    surface: *types.SwaylockSurface,
+) ?*types.c.cairo_surface_t {
+    var default_image: ?*types.c.cairo_surface_t = null;
+    const head = &st.images;
     var node = head.next;
     while (node != head) {
-        const image = wlEntry(c.swaylock_image, "link", node.?);
+        const image = wlEntry(types.SwaylockImage, "link", node.?);
         node = image.link.next;
         if (lenientStrcmp(
             image.output_name,
@@ -577,10 +680,11 @@ fn joinArgs(argv: [*c][*c]u8, argc: c_int) [*c]u8 {
     return res;
 }
 
-fn loadImage(arg: [*c]u8, st: *c.swaylock_state) void {
-    const image: *c.swaylock_image = @ptrCast(@alignCast(
-        c.calloc(1, @sizeOf(c.swaylock_image)),
-    ));
+fn loadImage(arg: [*c]u8, st: *types.SwaylockState) void {
+    const image = std.heap.c_allocator.create(
+        types.SwaylockImage,
+    ) catch @panic("OOM");
+    image.* = std.mem.zeroes(types.SwaylockImage);
     const separator: [*c]u8 = c.strchr(arg, ':');
     if (separator != null) {
         separator[0] = 0;
@@ -594,11 +698,11 @@ fn loadImage(arg: [*c]u8, st: *c.swaylock_state) void {
         image.path = c.strdup(arg);
     }
     // Replace any existing image for the same output.
-    const head: *c.wl_list = &st.images;
+    const head = &st.images;
     var node = head.next;
     while (node != head) {
         const iter_image =
-            wlEntry(c.swaylock_image, "link", node.?);
+            wlEntry(types.SwaylockImage, "link", node.?);
         node = iter_image.link.next;
         if (lenientStrcmp(
             iter_image.output_name,
@@ -606,24 +710,24 @@ fn loadImage(arg: [*c]u8, st: *c.swaylock_state) void {
         ) == 0) {
             if (image.output_name != null) {
                 slog(
-                    c.LOG_DEBUG,
+                    log_debug,
                     @src(),
                     "Replacing image defined for output {s} with {s}",
                     .{ image.output_name, image.path },
                 );
             } else {
                 slog(
-                    c.LOG_DEBUG,
+                    log_debug,
                     @src(),
                     "Replacing default image with {s}",
                     .{image.path},
                 );
             }
-            c.wl_list_remove(&iter_image.link);
+            wl.wl_list_remove(&iter_image.link);
             c.free(iter_image.cairo_surface);
             c.free(iter_image.output_name);
             c.free(iter_image.path);
-            c.free(iter_image);
+            std.heap.c_allocator.destroy(iter_image);
             break;
         }
     }
@@ -641,14 +745,14 @@ fn loadImage(arg: [*c]u8, st: *c.swaylock_state) void {
         image.path = joinArgs(p.we_wordv, @intCast(p.we_wordc));
         c.wordfree(&p);
     }
-    image.cairo_surface = c.load_background_image(image.path);
+    image.cairo_surface = load_background_image(image.path);
     if (image.cairo_surface == null) {
-        c.free(image);
+        std.heap.c_allocator.destroy(image);
         return;
     }
-    c.wl_list_insert(&st.images, &image.link);
+    wl.wl_list_insert(&st.images, &image.link);
     slog(
-        c.LOG_DEBUG,
+        log_debug,
         @src(),
         "Loaded image {s} for output {s}",
         .{
@@ -661,7 +765,7 @@ fn loadImage(arg: [*c]u8, st: *c.swaylock_state) void {
     );
 }
 
-fn setDefaultColors(colors: *c.swaylock_colors) void {
+fn setDefaultColors(colors: *types.SwaylockColors) void {
     colors.background = 0xA3A3A3FF;
     colors.bs_highlight = 0xDB3300FF;
     colors.key_highlight = 0x33DB00FF;
@@ -671,28 +775,28 @@ fn setDefaultColors(colors: *c.swaylock_colors) void {
     colors.layout_background = 0x000000C0;
     colors.layout_border = 0x00000000;
     colors.layout_text = 0xFFFFFFFF;
-    colors.inside = c.swaylock_colorset{
+    colors.inside = types.SwaylockColorSet{
         .input = 0x000000C0,
         .cleared = 0xE5A445C0,
         .caps_lock = 0x000000C0,
         .verifying = 0x0072FFC0,
         .wrong = 0xFA0000C0,
     };
-    colors.line = c.swaylock_colorset{
+    colors.line = types.SwaylockColorSet{
         .input = 0x000000FF,
         .cleared = 0x000000FF,
         .caps_lock = 0x000000FF,
         .verifying = 0x000000FF,
         .wrong = 0x000000FF,
     };
-    colors.ring = c.swaylock_colorset{
+    colors.ring = types.SwaylockColorSet{
         .input = 0x337D00FF,
         .cleared = 0xE5A445FF,
         .caps_lock = 0xE5A445FF,
         .verifying = 0x3300FFFF,
         .wrong = 0x7D3300FF,
     };
-    colors.text = c.swaylock_colorset{
+    colors.text = types.SwaylockColorSet{
         .input = 0xE5A445FF,
         .cleared = 0x000000FF,
         .caps_lock = 0xE5A445FF,
@@ -868,7 +972,7 @@ const usage =
 fn parseOptions(
     argc: c_int,
     argv: [*c][*c]u8,
-    st: ?*c.swaylock_state,
+    st: ?*types.SwaylockState,
     line_mode: ?*LineMode,
     config_path: ?*[*c]u8,
 ) c_int {
@@ -950,7 +1054,7 @@ fn parseOptions(
                 if (st) |s|
                     s.args.colors.background = parseColor(optarg);
             },
-            'd' => c.swaylock_log_init(c.LOG_DEBUG),
+            'd' => swaylock_log_init(log_debug),
             'e' => {
                 if (st) |s| s.args.ignore_empty = true;
             },
@@ -993,14 +1097,14 @@ fn parseOptions(
             },
             's' => {
                 if (st) |s| {
-                    s.args.mode = c.parse_background_mode(optarg);
-                    if (s.args.mode == c.BACKGROUND_MODE_INVALID)
+                    s.args.mode = parse_background_mode(optarg);
+                    if (s.args.mode == .invalid)
                         return 1;
                 }
             },
             't' => {
                 if (st) |s|
-                    s.args.mode = c.BACKGROUND_MODE_TILE;
+                    s.args.mode = .tile;
             },
             'u' => {
                 if (st) |s| s.args.show_indicator = false;
@@ -1216,13 +1320,13 @@ fn getConfigPath() ?[*c]u8 {
 
 fn loadConfig(
     path: [*c]u8,
-    st: *c.swaylock_state,
+    st: *types.SwaylockState,
     line_mode: *LineMode,
 ) c_int {
     const config = c.fopen(path, "r");
     if (config == null) {
         slog(
-            c.LOG_ERROR,
+            log_err,
             @src(),
             "Failed to read config. Running without it.",
             .{},
@@ -1246,14 +1350,14 @@ fn loadConfig(
         }
         if (line[0] == 0 or line[0] == '#') continue;
         slog(
-            c.LOG_DEBUG,
+            log_debug,
             @src(),
             "Config Line #{d}: {s}",
             .{ line_number, line },
         );
         const flag: [*c]u8 = @ptrCast(c.malloc(nread_u + 3));
         if (flag == null) {
-            slog(c.LOG_ERROR, @src(), "Failed to allocate memory", .{});
+            slog(log_err, @src(), "Failed to allocate memory", .{});
             return 0;
         }
         _ = c.sprintf(flag, "--%s", line);
@@ -1268,18 +1372,18 @@ fn loadConfig(
     return 0;
 }
 
-fn authStateStr(s: c.enum_auth_state) [*c]const u8 {
-    if (s == c.AUTH_STATE_IDLE) return "idle";
-    if (s == c.AUTH_STATE_VALIDATING) return "validating";
-    if (s == c.AUTH_STATE_INVALID) return "invalid";
+fn authStateStr(s: types.AuthState) [*c]const u8 {
+    if (s == .idle) return "idle";
+    if (s == .validating) return "validating";
+    if (s == .invalid) return "invalid";
     return "unknown";
 }
 
-fn authdStageStr(s: c.enum_authd_stage) [*c]const u8 {
-    if (s == c.AUTHD_STAGE_NONE) return "none";
-    if (s == c.AUTHD_STAGE_BROKER) return "broker";
-    if (s == c.AUTHD_STAGE_AUTH_MODE) return "auth_mode";
-    if (s == c.AUTHD_STAGE_CHALLENGE) return "challenge";
+fn authdStageStr(s: types.AuthdStage) [*c]const u8 {
+    if (s == .none) return "none";
+    if (s == .broker) return "broker";
+    if (s == .auth_mode) return "auth_mode";
+    if (s == .challenge) return "challenge";
     return "unknown";
 }
 
@@ -1291,7 +1395,7 @@ fn displayIn(
     _ = fd;
     _ = mask;
     _ = data;
-    if (c.wl_display_dispatch(state.display) == -1)
+    if (wl.wl_display_dispatch(state.display) == -1)
         state.run_display = false;
 }
 
@@ -1302,19 +1406,19 @@ fn commIn(
 ) callconv(std.builtin.CallingConvention.c) void {
     _ = fd;
     _ = data;
-    if ((mask & c.POLLERR) != 0) {
+    if ((mask & wl.POLLERR) != 0) {
         slog(
-            c.LOG_ERROR,
+            log_err,
             @src(),
             "Password checking subprocess crashed; exiting.",
             .{},
         );
         c.exit(c.EXIT_FAILURE);
     }
-    if ((mask & c.POLLIN) == 0) {
-        if ((mask & c.POLLHUP) != 0) {
+    if ((mask & wl.POLLIN) == 0) {
+        if ((mask & wl.POLLHUP) != 0) {
             slog(
-                c.LOG_ERROR,
+                log_err,
                 @src(),
                 "Password checking subprocess exited unexpectedly; exiting.",
                 .{},
@@ -1325,12 +1429,12 @@ fn commIn(
     }
     var payload: [*c]u8 = null;
     var len: usize = 0;
-    const msg_type = c.comm_main_read(&payload, &len);
+    const msg_type = comm_main_read(&payload, &len);
     defer c.free(payload);
     if (msg_type <= 0) {
         if (msg_type == 0) c.exit(c.EXIT_FAILURE);
         slog(
-            c.LOG_ERROR,
+            log_err,
             @src(),
             "comm_main_read failed; exiting.",
             .{},
@@ -1338,7 +1442,7 @@ fn commIn(
         c.exit(c.EXIT_FAILURE);
     }
     slog(
-        c.LOG_DEBUG,
+        log_debug,
         @src(),
         "comm_in: msg=0x{x:0>2} len={d} auth={s} stage={s}",
         .{
@@ -1351,10 +1455,10 @@ fn commIn(
     const payload_slice: []const u8 =
         if (payload) |p| p[0..len] else &.{};
     switch (msg_type) {
-        c.COMM_MSG_AUTH_RESULT => {
+        types.CommMsg.auth_result => {
             if (len >= 1 and payload != null and payload[0] == 0x01) {
                 slog(
-                    c.LOG_DEBUG,
+                    log_debug,
                     @src(),
                     "comm_in: AUTH_RESULT granted -> unlocking",
                     .{},
@@ -1362,21 +1466,21 @@ fn commIn(
                 state.run_display = false;
             } else {
                 slog(
-                    c.LOG_DEBUG,
+                    log_debug,
                     @src(),
                     "comm_in: AUTH_RESULT denied auth={s} -> invalid",
                     .{authStateStr(state.auth_state)},
                 );
-                state.auth_state = c.AUTH_STATE_INVALID;
-                c.schedule_auth_idle(&state);
+                state.auth_state = .invalid;
+                schedule_auth_idle(&state);
                 state.failed_attempts += 1;
                 damage_state(&state);
             }
         },
-        c.COMM_MSG_BROKERS => {
+        types.CommMsg.brokers => {
             // Parse JSON array [{id, name}, ...]
-            c.authd_brokers_free(
-                state.authd_brokers,
+            authd_brokers_free(
+                @ptrCast(state.authd_brokers),
                 state.authd_num_brokers,
             );
             state.authd_brokers = null;
@@ -1384,19 +1488,19 @@ fn commIn(
             state.authd_sel_broker = 0;
             parseBrokers(payload_slice);
             state.authd_active = true;
-            state.authd_stage = c.AUTHD_STAGE_BROKER;
+            state.authd_stage = .broker;
             slog(
-                c.LOG_DEBUG,
+                log_debug,
                 @src(),
                 "comm_in: BROKERS n={d} -> stage=broker",
                 .{state.authd_num_brokers},
             );
             damage_state(&state);
         },
-        c.COMM_MSG_AUTH_MODES => {
+        types.CommMsg.auth_modes => {
             // Parse JSON array [{id, label}, ...]
-            c.authd_auth_modes_free(
-                state.authd_auth_modes,
+            authd_auth_modes_free(
+                @ptrCast(state.authd_auth_modes),
                 state.authd_num_auth_modes,
             );
             state.authd_auth_modes = null;
@@ -1404,29 +1508,29 @@ fn commIn(
             state.authd_sel_auth_mode = 0;
             parseAuthModes(payload_slice);
             state.authd_active = true;
-            state.authd_stage = c.AUTHD_STAGE_AUTH_MODE;
+            state.authd_stage = .auth_mode;
             slog(
-                c.LOG_DEBUG,
+                log_debug,
                 @src(),
                 "comm_in: AUTH_MODES n={d} -> stage=auth_mode",
                 .{state.authd_num_auth_modes},
             );
             damage_state(&state);
         },
-        c.COMM_MSG_UI_LAYOUT => {
+        types.CommMsg.ui_layout => {
             // Parse UILayout JSON object.
-            c.authd_ui_layout_clear(&state.authd_layout);
+            authd_ui_layout_clear(&state.authd_layout);
             c.free(state.authd_error);
             state.authd_error = null;
             parseUiLayout(payload_slice);
             slog(
-                c.LOG_DEBUG,
+                log_debug,
                 @src(),
                 "comm_in: UI_LAYOUT type={s} label={s} entry={s} " ++
                     "wait={d} auth={s} -> idle/challenge",
                 .{
-                    if (state.authd_layout.@"type" != null)
-                        @as([*c]const u8, state.authd_layout.@"type")
+                    if (state.authd_layout.type != null)
+                        @as([*c]const u8, state.authd_layout.type)
                     else
                         @as([*c]const u8, "(null)"),
                     if (state.authd_layout.label != null)
@@ -1441,17 +1545,17 @@ fn commIn(
                     authStateStr(state.auth_state),
                 },
             );
-            state.auth_state = c.AUTH_STATE_IDLE;
-            state.authd_stage = c.AUTHD_STAGE_CHALLENGE;
+            state.auth_state = .idle;
+            state.authd_stage = .challenge;
             damage_state(&state);
         },
-        c.COMM_MSG_STAGE => {
+        types.CommMsg.stage => {
             if (len >= 1) {
-                const new_stage: c.enum_authd_stage =
-                    payload[0];
-                if (state.auth_state == c.AUTH_STATE_VALIDATING) {
+                const new_stage: types.AuthdStage =
+                    @enumFromInt(@as(c_int, payload[0]));
+                if (state.auth_state == .validating) {
                     slog(
-                        c.LOG_DEBUG,
+                        log_debug,
                         @src(),
                         "comm_in: STAGE {s} -> {s} while validating:" ++
                             " auth.Retry assumed, auth=validating -> invalid",
@@ -1460,12 +1564,12 @@ fn commIn(
                             authdStageStr(new_stage),
                         },
                     );
-                    state.auth_state = c.AUTH_STATE_INVALID;
-                    c.schedule_auth_idle(&state);
+                    state.auth_state = .invalid;
+                    schedule_auth_idle(&state);
                     state.failed_attempts += 1;
                 } else {
                     slog(
-                        c.LOG_DEBUG,
+                        log_debug,
                         @src(),
                         "comm_in: STAGE {s} -> {s} auth={s}",
                         .{
@@ -1479,13 +1583,13 @@ fn commIn(
                 damage_state(&state);
             }
         },
-        c.COMM_MSG_AUTH_EVENT => {
+        types.CommMsg.auth_event => {
             // Intermediate result — show as error/info.
             c.free(state.authd_error);
             state.authd_error = null;
             parseAuthEvent(payload_slice);
             slog(
-                c.LOG_DEBUG,
+                log_debug,
                 @src(),
                 "comm_in: AUTH_EVENT msg={s} auth={s} -> idle",
                 .{
@@ -1496,7 +1600,7 @@ fn commIn(
                     authStateStr(state.auth_state),
                 },
             );
-            state.auth_state = c.AUTH_STATE_IDLE;
+            state.auth_state = .idle;
             damage_state(&state);
         },
         else => {},
@@ -1516,10 +1620,9 @@ fn parseBrokers(json: []const u8) void {
     ) catch return;
     defer parsed.deinit();
     const n = @min(parsed.value.len, 256);
-    const brokers: [*c]c.authd_broker = @ptrCast(@alignCast(
-        c.calloc(n, @sizeOf(c.authd_broker)),
-    ));
-    if (brokers == null) return;
+    const raw = c.calloc(n, @sizeOf(types.AuthdBroker));
+    if (raw == null) return;
+    const brokers: [*]types.AuthdBroker = @ptrCast(@alignCast(raw));
     state.authd_brokers = brokers;
     state.authd_num_brokers = @intCast(n);
     for (0..n) |i| {
@@ -1542,10 +1645,9 @@ fn parseAuthModes(json: []const u8) void {
     ) catch return;
     defer parsed.deinit();
     const n = @min(parsed.value.len, 256);
-    const modes: [*c]c.authd_auth_mode = @ptrCast(@alignCast(
-        c.calloc(n, @sizeOf(c.authd_auth_mode)),
-    ));
-    if (modes == null) return;
+    const raw = c.calloc(n, @sizeOf(types.AuthdAuthMode));
+    if (raw == null) return;
+    const modes: [*]types.AuthdAuthMode = @ptrCast(@alignCast(raw));
     state.authd_auth_modes = modes;
     state.authd_num_auth_modes = @intCast(n);
     for (0..n) |i| {
@@ -1557,7 +1659,7 @@ fn parseAuthModes(json: []const u8) void {
 
 fn parseUiLayout(json: []const u8) void {
     const Layout = struct {
-        @"type": ?[]const u8 = null,
+        type: ?[]const u8 = null,
         label: ?[]const u8 = null,
         button: ?[]const u8 = null,
         entry: ?[]const u8 = null,
@@ -1573,8 +1675,8 @@ fn parseUiLayout(json: []const u8) void {
     ) catch return;
     defer parsed.deinit();
     const layout = parsed.value;
-    state.authd_layout.@"type" =
-        if (layout.@"type") |s| dupStr(s) else null;
+    state.authd_layout.type =
+        if (layout.type) |s| dupStr(s) else null;
     state.authd_layout.label =
         if (layout.label) |s| dupStr(s) else null;
     state.authd_layout.button =
@@ -1639,32 +1741,32 @@ fn logInit(argc: c_int, argv: [*c][*c]u8) void {
         );
         if (ch == -1) break;
         if (ch == 'd') {
-            c.swaylock_log_init(c.LOG_DEBUG);
+            swaylock_log_init(log_debug);
             return;
         }
     }
-    c.swaylock_log_init(c.LOG_ERROR);
+    swaylock_log_init(log_err);
 }
 
 export fn main(argc: c_int, argv: [*c][*c]u8) c_int {
     logInit(argc, argv);
-    c.initialize_pw_backend(argc, argv);
-    _ = c.srand(@intCast(c.time(null)));
+    initialize_pw_backend(argc, argv);
+    _ = c.srand(@intCast(wl.time(null)));
 
     var line_mode: LineMode = .line;
     state.failed_attempts = 0;
     state.authd_active = false;
-    state.authd_stage = c.AUTHD_STAGE_NONE;
+    state.authd_stage = .none;
     state.authd_brokers = null;
     state.authd_num_brokers = 0;
     state.authd_sel_broker = -1;
     state.authd_auth_modes = null;
     state.authd_num_auth_modes = 0;
     state.authd_sel_auth_mode = -1;
-    state.authd_layout = std.mem.zeroes(c.authd_ui_layout);
+    state.authd_layout = std.mem.zeroes(types.AuthdUiLayout);
     state.authd_error = null;
-    state.args = std.mem.zeroes(c.swaylock_args);
-    state.args.mode = c.BACKGROUND_MODE_FILL;
+    state.args = std.mem.zeroes(types.SwaylockArgs);
+    state.args.mode = .fill;
     state.args.font = c.strdup("sans-serif");
     state.args.font_size = 0;
     state.args.radius = 50;
@@ -1682,7 +1784,7 @@ export fn main(argc: c_int, argv: [*c][*c]u8) c_int {
     state.args.show_failed_attempts = false;
     state.args.indicator_idle_visible = false;
     state.args.ready_fd = -1;
-    c.wl_list_init(&state.images);
+    wl.wl_list_init(&state.images);
     setDefaultColors(&state.args.colors);
 
     var config_path: [*c]u8 = null;
@@ -1695,7 +1797,7 @@ export fn main(argc: c_int, argv: [*c][*c]u8) c_int {
         config_path = getConfigPath() orelse null;
     if (config_path != null) {
         slog(
-            c.LOG_DEBUG,
+            log_debug,
             @src(),
             "Found config at {s}",
             .{config_path},
@@ -1709,7 +1811,7 @@ export fn main(argc: c_int, argv: [*c][*c]u8) c_int {
         }
     }
     if (argc > 1) {
-        slog(c.LOG_DEBUG, @src(), "Parsing CLI Args", .{});
+        slog(log_debug, @src(), "Parsing CLI Args", .{});
         result = parseOptions(argc, argv, &state, &line_mode, null);
         if (result != 0) {
             c.free(state.args.font);
@@ -1725,17 +1827,17 @@ export fn main(argc: c_int, argv: [*c][*c]u8) c_int {
     state.password.len = 0;
     state.password.buffer_len = 1024;
     state.password.buffer =
-        c.password_buffer_create(state.password.buffer_len);
+        password_buffer_create(state.password.buffer_len);
     if (state.password.buffer == null) return c.EXIT_FAILURE;
     state.password.buffer[0] = 0;
 
     if (c.pipe(&sigusr_fds) != 0) {
-        slog(c.LOG_ERROR, @src(), "Failed to pipe", .{});
+        slog(log_err, @src(), "Failed to pipe", .{});
         return c.EXIT_FAILURE;
     }
     if (c.fcntl(sigusr_fds[1], c.F_SETFL, c.O_NONBLOCK) == -1) {
         slog(
-            c.LOG_ERROR,
+            log_err,
             @src(),
             "Failed to make pipe end nonblocking",
             .{},
@@ -1743,13 +1845,14 @@ export fn main(argc: c_int, argv: [*c][*c]u8) c_int {
         return c.EXIT_FAILURE;
     }
 
-    c.wl_list_init(&state.surfaces);
-    state.xkb.context = c.xkb_context_new(c.XKB_CONTEXT_NO_FLAGS);
-    state.display = c.wl_display_connect(null);
+    wl.wl_list_init(&state.surfaces);
+    state.xkb.context =
+        types.c.xkb_context_new(types.c.XKB_CONTEXT_NO_FLAGS);
+    state.display = wl.wl_display_connect(null);
     if (state.display == null) {
         c.free(state.args.font);
         slog(
-            c.LOG_ERROR,
+            log_err,
             @src(),
             "Unable to connect to the compositor. " ++
                 "If your compositor is running, check or set the " ++
@@ -1758,14 +1861,18 @@ export fn main(argc: c_int, argv: [*c][*c]u8) c_int {
         );
         return c.EXIT_FAILURE;
     }
-    state.eventloop = c.loop_create();
+    state.eventloop = loop_create();
 
     const registry =
-        c.wl_display_get_registry(state.display);
-    _ = c.wl_registry_add_listener(registry, &registry_listener, &state);
-    if (c.wl_display_roundtrip(state.display) == -1) {
+        wl.wl_display_get_registry(state.display);
+    _ = wl.wl_registry_add_listener(
+        registry,
+        &registry_listener,
+        &state,
+    );
+    if (wl.wl_display_roundtrip(state.display) == -1) {
         slog(
-            c.LOG_ERROR,
+            log_err,
             @src(),
             "wl_display_roundtrip() failed",
             .{},
@@ -1774,20 +1881,20 @@ export fn main(argc: c_int, argv: [*c][*c]u8) c_int {
     }
 
     if (state.compositor == null) {
-        slog(c.LOG_ERROR, @src(), "Missing wl_compositor", .{});
+        slog(log_err, @src(), "Missing wl_compositor", .{});
         return 1;
     }
     if (state.subcompositor == null) {
-        slog(c.LOG_ERROR, @src(), "Missing wl_subcompositor", .{});
+        slog(log_err, @src(), "Missing wl_subcompositor", .{});
         return 1;
     }
     if (state.shm == null) {
-        slog(c.LOG_ERROR, @src(), "Missing wl_shm", .{});
+        slog(log_err, @src(), "Missing wl_shm", .{});
         return 1;
     }
     if (state.ext_session_lock_manager_v1 == null) {
         slog(
-            c.LOG_ERROR,
+            log_err,
             @src(),
             "Missing ext-session-lock-v1",
             .{},
@@ -1797,18 +1904,18 @@ export fn main(argc: c_int, argv: [*c][*c]u8) c_int {
 
     if (state.args.steal_unlock) {
         state.ext_session_lock_v1 =
-            c.ext_session_lock_manager_v1_lock(
+            wl.ext_session_lock_manager_v1_lock(
                 state.ext_session_lock_manager_v1,
             );
-        _ = c.ext_session_lock_v1_add_listener(
+        _ = wl.ext_session_lock_v1_add_listener(
             state.ext_session_lock_v1,
             &ext_session_lock_v1_listener,
             &state,
         );
         while (!state.locked and !state.lock_failed) {
-            if (c.wl_display_dispatch(state.display) < 0) {
+            if (wl.wl_display_dispatch(state.display) < 0) {
                 slog(
-                    c.LOG_ERROR,
+                    log_err,
                     @src(),
                     "wl_display_dispatch() failed",
                     .{},
@@ -1818,7 +1925,7 @@ export fn main(argc: c_int, argv: [*c][*c]u8) c_int {
         }
         if (!state.locked) {
             slog(
-                c.LOG_ERROR,
+                log_err,
                 @src(),
                 "Compositor refused the lock; " ++
                     "another locker may still be connected.",
@@ -1826,48 +1933,48 @@ export fn main(argc: c_int, argv: [*c][*c]u8) c_int {
             );
             return 1;
         }
-        c.ext_session_lock_v1_unlock_and_destroy(
+        wl.ext_session_lock_v1_unlock_and_destroy(
             state.ext_session_lock_v1,
         );
-        _ = c.wl_display_roundtrip(state.display);
+        _ = wl.wl_display_roundtrip(state.display);
         return 0;
     }
 
     state.ext_session_lock_v1 =
-        c.ext_session_lock_manager_v1_lock(
+        wl.ext_session_lock_manager_v1_lock(
             state.ext_session_lock_manager_v1,
         );
-    _ = c.ext_session_lock_v1_add_listener(
+    _ = wl.ext_session_lock_v1_add_listener(
         state.ext_session_lock_v1,
         &ext_session_lock_v1_listener,
         &state,
     );
 
-    if (c.wl_display_roundtrip(state.display) == -1) {
+    if (wl.wl_display_roundtrip(state.display) == -1) {
         c.free(state.args.font);
         return 1;
     }
 
-    state.test_surface = c.cairo_image_surface_create(
-        c.CAIRO_FORMAT_RGB24,
+    state.test_surface = types.c.cairo_image_surface_create(
+        types.c.CAIRO_FORMAT_RGB24,
         1,
         1,
     );
-    state.test_cairo = c.cairo_create(state.test_surface);
+    state.test_cairo = types.c.cairo_create(state.test_surface);
 
-    const head: *c.wl_list = &state.surfaces;
+    const head = &state.surfaces;
     var node = head.next;
     while (node != head) {
         const surface =
-            wlEntry(c.swaylock_surface, "link", node.?);
+            wlEntry(types.SwaylockSurface, "link", node.?);
         node = surface.link.next;
         createSurface(surface);
     }
 
     while (!state.locked) {
-        if (c.wl_display_dispatch(state.display) < 0) {
+        if (wl.wl_display_dispatch(state.display) < 0) {
             slog(
-                c.LOG_ERROR,
+                log_err,
                 @src(),
                 "wl_display_dispatch() failed",
                 .{},
@@ -1879,7 +1986,7 @@ export fn main(argc: c_int, argv: [*c][*c]u8) c_int {
     if (state.args.ready_fd >= 0) {
         if (c.write(state.args.ready_fd, "\n", 1) != 1) {
             slog(
-                c.LOG_ERROR,
+                log_err,
                 @src(),
                 "Failed to send readiness notification",
                 .{},
@@ -1891,24 +1998,24 @@ export fn main(argc: c_int, argv: [*c][*c]u8) c_int {
     }
     if (state.args.daemonize) daemonize();
 
-    c.loop_add_fd(
-        state.eventloop,
-        c.wl_display_get_fd(state.display),
-        c.POLLIN,
+    loop_add_fd(
+        state.eventloop.?,
+        wl.wl_display_get_fd(state.display),
+        @as(c_short, @intCast(wl.POLLIN)),
         displayIn,
         null,
     );
-    c.loop_add_fd(
-        state.eventloop,
-        c.get_comm_reply_fd(),
-        c.POLLIN,
+    loop_add_fd(
+        state.eventloop.?,
+        get_comm_reply_fd(),
+        @as(c_short, @intCast(wl.POLLIN)),
         commIn,
         null,
     );
-    c.loop_add_fd(
-        state.eventloop,
+    loop_add_fd(
+        state.eventloop.?,
         sigusr_fds[0],
-        c.POLLIN,
+        @as(c_short, @intCast(wl.POLLIN)),
         termIn,
         null,
     );
@@ -1936,20 +2043,20 @@ export fn main(argc: c_int, argv: [*c][*c]u8) c_int {
     state.run_display = true;
     while (state.run_display) {
         c.__errno_location().* = 0;
-        if (c.wl_display_flush(state.display) == -1 and
+        if (wl.wl_display_flush(state.display) == -1 and
             c.__errno_location().* != c.EAGAIN)
         {
             break;
         }
-        c.loop_poll(state.eventloop);
+        loop_poll(state.eventloop.?);
     }
 
-    c.ext_session_lock_v1_unlock_and_destroy(state.ext_session_lock_v1);
+    wl.ext_session_lock_v1_unlock_and_destroy(state.ext_session_lock_v1);
     state.ext_session_lock_v1 = null;
-    _ = c.wl_display_roundtrip(state.display);
+    _ = wl.wl_display_roundtrip(state.display);
 
     c.free(state.args.font);
-    c.cairo_destroy(state.test_cairo);
-    c.cairo_surface_destroy(state.test_surface);
+    types.c.cairo_destroy(state.test_cairo);
+    types.c.cairo_surface_destroy(state.test_surface);
     return 0;
 }

@@ -3,6 +3,24 @@
 //! All JSON processing uses std.json in place of cJSON.
 
 const std = @import("std");
+const types = @import("types");
+
+const log_err: c_int = @intFromEnum(types.LogImportance.err);
+const log_info: c_int = @intFromEnum(types.LogImportance.info);
+const log_debug: c_int = @intFromEnum(types.LogImportance.debug);
+
+extern fn _swaylock_log(verbosity: c_int, fmt: [*c]const u8, ...) void;
+extern fn _swaylock_strip_path(filepath: [*c]const u8) [*c]const u8;
+extern fn comm_child_read(payload: *[*c]u8, len: *usize) c_int;
+extern fn comm_child_write(
+    msg_type: u8,
+    payload: [*c]const u8,
+    len: usize,
+) bool;
+extern fn password_buffer_create(size: usize) [*c]u8;
+extern fn password_buffer_destroy(buffer: [*c]u8, size: usize) void;
+extern fn clear_buffer(buf: [*c]u8, size: usize) void;
+extern fn spawn_comm_child() bool;
 
 const c = @cImport({
     @cDefine("_POSIX_C_SOURCE", "200809L");
@@ -14,10 +32,6 @@ const c = @cImport({
     @cInclude("string.h");
     @cInclude("unistd.h");
     @cInclude("gdm/gdm-custom-json-pam-extension.h");
-    @cInclude("comm.h");
-    @cInclude("log.h");
-    @cInclude("password-buffer.h");
-    @cInclude("swaylock.h");
 });
 
 /// Declared in comm.c but not exported via comm.h.
@@ -52,29 +66,29 @@ fn slog(
 ) void {
     var buf: [512]u8 = undefined;
     const msg = std.fmt.bufPrintZ(&buf, fmt, args) catch return;
-    c._swaylock_log(
-        @as(c.enum_log_importance, @intCast(verbosity)),
+    _swaylock_log(
+        verbosity,
         "[%s:%d] %s",
-        c._swaylock_strip_path(src.file.ptr),
+        _swaylock_strip_path(src.file.ptr),
         @as(c_int, @intCast(src.line)),
         msg.ptr,
     );
 }
 
 /// Free all heap-allocated fields of a ui-layout and zero the struct.
-export fn authd_ui_layout_clear(layout: *c.authd_ui_layout) void {
+export fn authd_ui_layout_clear(layout: *types.AuthdUiLayout) void {
     c.free(layout.type);
     c.free(layout.label);
     c.free(layout.button);
     c.free(layout.entry);
     c.free(layout.qr_content);
     c.free(layout.qr_code);
-    layout.* = std.mem.zeroes(c.authd_ui_layout);
+    layout.* = std.mem.zeroes(types.AuthdUiLayout);
 }
 
 /// Free a heap-allocated slice of authd_broker structs.
 export fn authd_brokers_free(
-    brokers: [*c]c.authd_broker,
+    brokers: [*c]types.AuthdBroker,
     count: c_int,
 ) void {
     var i: usize = 0;
@@ -87,7 +101,7 @@ export fn authd_brokers_free(
 
 /// Free a heap-allocated slice of authd_auth_mode structs.
 export fn authd_auth_modes_free(
-    modes: [*c]c.authd_auth_mode,
+    modes: [*c]types.AuthdAuthMode,
     count: c_int,
 ) void {
     var i: usize = 0;
@@ -136,7 +150,7 @@ const ConvState = struct {
 
 /// Send a byte slice over the IPC channel then free it.
 fn commSend(msg_type: u8, bytes: []u8) void {
-    _ = c.comm_child_write(msg_type, bytes.ptr, bytes.len);
+    _ = comm_child_write(msg_type, @ptrCast(bytes.ptr), bytes.len);
     std.heap.c_allocator.free(bytes);
 }
 
@@ -266,7 +280,7 @@ fn handleGdmJson(
         .{},
     ) catch {
         slog(
-            c.LOG_ERROR,
+            log_err,
             @src(),
             "cJSON_Parse failed: {s}",
             .{input[0..@min(80, input.len)]},
@@ -283,7 +297,7 @@ fn handleGdmJson(
         .string => |s| s,
         else => return null,
     };
-    slog(c.LOG_DEBUG, @src(), "handle_gdm_json: type={s}", .{tp});
+    slog(log_debug, @src(), "handle_gdm_json: type={s}", .{tp});
 
     var aw: std.Io.Writer.Allocating = .init(std.heap.c_allocator);
     defer aw.deinit();
@@ -318,7 +332,7 @@ fn handleGdmJson(
             else => "",
         };
         slog(
-            c.LOG_DEBUG,
+            log_debug,
             @src(),
             "handle_gdm_json: event type={s}",
             .{etype},
@@ -353,7 +367,7 @@ fn handleGdmJson(
                     brokers.items,
                     .{},
                 ) catch null) |bytes|
-                    commSend(c.COMM_MSG_BROKERS, bytes);
+                    commSend(types.CommMsg.brokers, bytes);
             }
         } else if (std.mem.eql(u8, etype, "authModesReceived")) {
             const modes_val = event_obj.get("authModes") orelse .null;
@@ -387,7 +401,7 @@ fn handleGdmJson(
                     modes.items,
                     .{},
                 ) catch null) |bytes|
-                    commSend(c.COMM_MSG_AUTH_MODES, bytes);
+                    commSend(types.CommMsg.auth_modes, bytes);
             }
         } else if (std.mem.eql(u8, etype, "uiLayoutReceived")) {
             const layout_val = event_obj.get("uiLayout") orelse .null;
@@ -396,36 +410,46 @@ fn handleGdmJson(
                 layout_val,
                 .{},
             ) catch null) |bytes|
-                commSend(c.COMM_MSG_UI_LAYOUT, bytes);
+                commSend(types.CommMsg.ui_layout, bytes);
         } else if (std.mem.eql(u8, etype, "stageChanged")) {
             const stage_val = event_obj.get("stage") orelse .null;
-            var stage_byte: u8 = @intCast(c.AUTHD_STAGE_NONE);
+            var stage_byte: u8 = @intCast(
+                @intFromEnum(types.AuthdStage.none),
+            );
             if (stage_val == .string) {
                 const s = stage_val.string;
                 if (std.mem.eql(u8, s, "brokerSelection"))
-                    stage_byte = @intCast(c.AUTHD_STAGE_BROKER)
+                    stage_byte = @intCast(
+                        @intFromEnum(types.AuthdStage.broker),
+                    )
                 else if (std.mem.eql(u8, s, "authModeSelection"))
-                    stage_byte = @intCast(c.AUTHD_STAGE_AUTH_MODE)
+                    stage_byte = @intCast(
+                        @intFromEnum(types.AuthdStage.auth_mode),
+                    )
                 else if (std.mem.eql(u8, s, "challenge"))
-                    stage_byte = @intCast(c.AUTHD_STAGE_CHALLENGE);
+                    stage_byte = @intCast(
+                        @intFromEnum(types.AuthdStage.challenge),
+                    );
                 // "userSelection" → AUTHD_STAGE_NONE (default)
             }
-            _ = c.comm_child_write(
-                c.COMM_MSG_STAGE,
+            _ = comm_child_write(
+                types.CommMsg.stage,
                 @ptrCast(&stage_byte),
                 @sizeOf(u8),
             );
         } else if (std.mem.eql(u8, etype, "startAuthentication")) {
             slog(
-                c.LOG_DEBUG,
+                log_debug,
                 @src(),
                 "handle_gdm_json: startAuthentication" ++
                     " -> sending COMM_MSG_STAGE challenge",
                 .{},
             );
-            const stage_byte: u8 = @intCast(c.AUTHD_STAGE_CHALLENGE);
-            _ = c.comm_child_write(
-                c.COMM_MSG_STAGE,
+            const stage_byte: u8 = @intCast(
+                @intFromEnum(types.AuthdStage.challenge),
+            );
+            _ = comm_child_write(
+                types.CommMsg.stage,
                 @ptrCast(&stage_byte),
                 @sizeOf(u8),
             );
@@ -444,12 +468,12 @@ fn handleGdmJson(
                     else => "(none)",
                 };
                 slog(
-                    c.LOG_DEBUG,
+                    log_debug,
                     @src(),
                     "handle_gdm_json: authEvent access={s} -> AUTH_EVENT",
                     .{access_str},
                 );
-                commSend(c.COMM_MSG_AUTH_EVENT, bytes);
+                commSend(types.CommMsg.auth_event, bytes);
             }
         }
         // All event subtypes reply with eventAck.
@@ -463,7 +487,7 @@ fn handleGdmJson(
             state.user_selected_sent = true;
         }
         slog(
-            c.LOG_DEBUG,
+            log_debug,
             @src(),
             "handle_gdm_json: poll pending={d} user_sel_sent={d}",
             .{ state.pending_count, @intFromBool(state.user_selected_sent) },
@@ -479,20 +503,21 @@ fn handleGdmJson(
 
             var payload: [*c]u8 = null;
             var plen: usize = 0;
-            const mtype = c.comm_child_read(@ptrCast(&payload), &plen);
-            if (mtype <= 0) {
+            const mtype_raw = comm_child_read(&payload, &plen);
+            if (mtype_raw <= 0) {
                 c.free(payload);
                 break;
             }
+            const mtype: u8 = @intCast(mtype_raw);
             slog(
-                c.LOG_DEBUG,
+                log_debug,
                 @src(),
                 "handle_gdm_json: poll read mtype=0x{x:0>2} plen={d}",
                 .{ mtype, plen },
             );
 
             const maybe_event: ?GdmEvent = switch (mtype) {
-                c.COMM_MSG_BROKER_SEL => blk: {
+                types.CommMsg.broker_sel => blk: {
                     const raw: []const u8 = if (payload != null)
                         std.mem.span(@as([*:0]const u8, @ptrCast(payload)))
                     else
@@ -502,9 +527,11 @@ fn handleGdmJson(
                         break :blk null;
                     };
                     c.free(payload);
-                    break :blk GdmEvent{ .brokerSelected = .{ .brokerId = id } };
+                    break :blk GdmEvent{
+                        .brokerSelected = .{ .brokerId = id },
+                    };
                 },
-                c.COMM_MSG_AUTH_MODE_SEL => blk: {
+                types.CommMsg.auth_mode_sel => blk: {
                     const raw: []const u8 = if (payload != null)
                         std.mem.span(@as([*:0]const u8, @ptrCast(payload)))
                     else
@@ -518,29 +545,29 @@ fn handleGdmJson(
                         .authModeSelected = .{ .authModeId = id },
                     };
                 },
-                c.COMM_MSG_BUTTON => blk: {
+                types.CommMsg.button => blk: {
                     c.free(payload);
                     break :blk GdmEvent{ .reselectAuthMode = .{} };
                 },
-                c.COMM_MSG_CANCEL => blk: {
+                types.CommMsg.cancel => blk: {
                     c.free(payload);
                     break :blk GdmEvent{ .isAuthenticatedCancelled = .{} };
                 },
-                c.COMM_MSG_PASSWORD => blk: {
+                types.CommMsg.password => blk: {
                     const raw: []const u8 = if (payload != null)
                         std.mem.span(@as([*:0]const u8, @ptrCast(payload)))
                     else
                         "";
                     const secret = std.heap.c_allocator.dupe(u8, raw) catch {
                         if (payload != null) {
-                            c.clear_buffer(payload, plen);
+                            clear_buffer(payload, plen);
                             c.free(payload);
                         }
                         break :blk null;
                     };
                     // Clear the original credential before freeing.
                     if (payload != null) {
-                        c.clear_buffer(payload, plen);
+                        clear_buffer(payload, plen);
                         c.free(payload);
                     }
                     break :blk GdmEvent{
@@ -561,7 +588,7 @@ fn handleGdmJson(
         }
 
         slog(
-            c.LOG_DEBUG,
+            log_debug,
             @src(),
             "handle_gdm_json: pollResponse nevents={d}",
             .{state.pending_count},
@@ -588,13 +615,13 @@ fn handleConversation(
     data: ?*anyopaque,
 ) callconv(.c) c_int {
     const state: *ConvState = @ptrCast(@alignCast(data.?));
-    slog(c.LOG_DEBUG, @src(), "handle_conversation: num_msg={d}", .{num_msg});
+    slog(log_debug, @src(), "handle_conversation: num_msg={d}", .{num_msg});
 
     const pam_reply: [*c]c.pam_response = @ptrCast(@alignCast(
         c.calloc(@intCast(num_msg), @sizeOf(c.pam_response)),
     ));
     if (pam_reply == null) {
-        slog(c.LOG_ERROR, @src(), "allocation failed", .{});
+        slog(log_err, @src(), "allocation failed", .{});
         return c.PAM_ABORT;
     }
     resp.* = pam_reply;
@@ -603,7 +630,7 @@ fn handleConversation(
     while (i < num_msg) : (i += 1) {
         const idx: usize = @intCast(i);
         slog(
-            c.LOG_DEBUG,
+            log_debug,
             @src(),
             "handle_conversation: msg[{d}] style={d}",
             .{ i, msg[idx].*.msg_style },
@@ -618,14 +645,16 @@ fn handleConversation(
                 // this transitions it to AUTH_STATE_INVALID
                 // ("Wrong") and then back to IDLE so the user
                 // can type again.
-                const stage_byte: u8 = @intCast(c.AUTHD_STAGE_CHALLENGE);
-                _ = c.comm_child_write(
-                    c.COMM_MSG_STAGE,
+                const stage_byte: u8 = @intCast(
+                    @intFromEnum(types.AuthdStage.challenge),
+                );
+                _ = comm_child_write(
+                    types.CommMsg.stage,
                     @ptrCast(&stage_byte),
                     @sizeOf(u8),
                 );
                 slog(
-                    c.LOG_DEBUG,
+                    log_debug,
                     @src(),
                     "handle_conversation: PAM_PROMPT" ++
                         " sent STAGE, waiting for password",
@@ -635,29 +664,30 @@ fn handleConversation(
                 var payload: [*c]u8 = null;
                 var len: usize = 0;
                 while (true) {
-                    const t = c.comm_child_read(@ptrCast(&payload), &len);
-                    if (t <= 0) return c.PAM_ABORT;
-                    if (t == c.COMM_MSG_PASSWORD) break;
+                    const t_raw = comm_child_read(&payload, &len);
+                    if (t_raw <= 0) return c.PAM_ABORT;
+                    const t: u8 = @intCast(t_raw);
+                    if (t == types.CommMsg.password) break;
                     c.free(payload);
                     payload = null;
                 }
                 slog(
-                    c.LOG_DEBUG,
+                    log_debug,
                     @src(),
                     "handle_conversation: PAM_PROMPT got password (len={d})",
                     .{len},
                 );
 
                 pam_reply[idx].resp = c.strdup(payload);
-                c.clear_buffer(payload, len);
+                clear_buffer(payload, len);
                 c.free(payload);
                 if (pam_reply[idx].resp == null) {
-                    slog(c.LOG_ERROR, @src(), "allocation failed", .{});
+                    slog(log_err, @src(), "allocation failed", .{});
                     return c.PAM_ABORT;
                 }
             },
             c.PAM_TEXT_INFO => slog(
-                c.LOG_DEBUG,
+                log_debug,
                 @src(),
                 "handle_conversation: PAM_TEXT_INFO: {s}",
                 .{if (msg[idx].*.msg != null)
@@ -666,7 +696,7 @@ fn handleConversation(
                     "(null)"},
             ),
             c.PAM_ERROR_MSG => slog(
-                c.LOG_DEBUG,
+                log_debug,
                 @src(),
                 "handle_conversation: PAM_ERROR_MSG: {s}",
                 .{if (msg[idx].*.msg != null)
@@ -702,7 +732,7 @@ fn handleConversation(
                     }
                 }
                 slog(
-                    c.LOG_DEBUG,
+                    log_debug,
                     @src(),
                     "handle_conversation: unknown msg_style={d}",
                     .{msg[idx].*.msg_style},
@@ -711,7 +741,7 @@ fn handleConversation(
         }
     }
     slog(
-        c.LOG_DEBUG,
+        log_debug,
         @src(),
         "handle_conversation: returning PAM_SUCCESS",
         .{},
@@ -723,7 +753,7 @@ fn handleConversation(
 export fn initialize_pw_backend(argc: c_int, argv: [*c][*c]u8) void {
     _ = argc;
     _ = argv;
-    if (!c.spawn_comm_child()) c.exit(c.EXIT_FAILURE);
+    if (!spawn_comm_child()) c.exit(c.EXIT_FAILURE);
 }
 
 /// Run the PAM authentication loop in the child process.  Never returns.
@@ -733,7 +763,7 @@ export fn run_pw_backend_child() void {
 
     const passwd_ptr = c.getpwuid(c.getuid());
     if (passwd_ptr == null) {
-        slog(c.LOG_ERROR, @src(), "getpwuid failed", .{});
+        slog(log_err, @src(), "getpwuid failed", .{});
         c.exit(c.EXIT_FAILURE);
     }
     const username = passwd_ptr.*.pw_name;
@@ -751,11 +781,11 @@ export fn run_pw_backend_child() void {
         &conv,
         &auth_handle,
     ) != c.PAM_SUCCESS) {
-        slog(c.LOG_ERROR, @src(), "pam_start failed", .{});
+        slog(log_err, @src(), "pam_start failed", .{});
         c.exit(c.EXIT_FAILURE);
     }
     slog(
-        c.LOG_DEBUG,
+        log_debug,
         @src(),
         "Prepared to authorise user {s}",
         .{std.mem.span(username)},
@@ -765,15 +795,15 @@ export fn run_pw_backend_child() void {
     while (true) {
         pam_status = c.pam_authenticate(auth_handle, 0);
         if (pam_status == c.PAM_SUCCESS) {
-            _ = c.comm_child_write(c.COMM_MSG_AUTH_RESULT, "\x01", 1);
+            _ = comm_child_write(types.CommMsg.auth_result, "\x01", 1);
         } else {
             slog(
-                c.LOG_ERROR,
+                log_err,
                 @src(),
                 "pam_authenticate failed: {s}",
                 .{std.mem.span(getPamAuthError(pam_status))},
             );
-            _ = c.comm_child_write(c.COMM_MSG_AUTH_RESULT, "\x00", 1);
+            _ = comm_child_write(types.CommMsg.auth_result, "\x00", 1);
         }
         if (pam_status != c.PAM_AUTH_ERR) break;
     }
@@ -781,7 +811,7 @@ export fn run_pw_backend_child() void {
     _ = c.pam_setcred(auth_handle, c.PAM_REFRESH_CRED);
 
     if (c.pam_end(auth_handle, pam_status) != c.PAM_SUCCESS) {
-        slog(c.LOG_ERROR, @src(), "pam_end failed", .{});
+        slog(log_err, @src(), "pam_end failed", .{});
         c.exit(c.EXIT_FAILURE);
     }
     c.exit(if (pam_status == c.PAM_SUCCESS)

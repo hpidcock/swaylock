@@ -4,6 +4,7 @@
 
 const std = @import("std");
 const opts = @import("log_options");
+const types = @import("types");
 
 const c = @cImport({
     @cDefine("_POSIX_C_SOURCE", "200809L");
@@ -26,12 +27,12 @@ extern fn vsnprintf(
     arg: *anyopaque,
 ) c_int;
 
-// Importance levels – must match enum log_importance in log.h.
-const log_silent: c_int = 0;
-const log_error: c_int = 1;
-const log_info: c_int = 2;
-const log_debug: c_int = 3;
-const log_importance_last: c_int = 4;
+// Importance levels – derived from the shared types enum.
+const log_silent: c_int = @intFromEnum(types.LogImportance.silent);
+const log_error: c_int = @intFromEnum(types.LogImportance.err);
+const log_info: c_int = @intFromEnum(types.LogImportance.info);
+const log_debug: c_int = @intFromEnum(types.LogImportance.debug);
+const log_importance_last: c_int = @intFromEnum(types.LogImportance.last);
 
 const verbosity_colors = [_][*:0]const u8{
     "", // LOG_SILENT

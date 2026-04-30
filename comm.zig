@@ -2,6 +2,15 @@
 //! IPC pipes between the main swaylock process and the PAM child.
 
 const std = @import("std");
+const types = @import("types");
+
+const log_err: c_int = @intFromEnum(types.LogImportance.err);
+
+extern fn _swaylock_log(verbosity: c_int, fmt: [*c]const u8, ...) void;
+extern fn _swaylock_strip_path(filepath: [*c]const u8) [*c]const u8;
+extern fn password_buffer_create(size: usize) [*c]u8;
+extern fn password_buffer_destroy(buffer: [*c]u8, size: usize) void;
+extern fn clear_password_buffer(pw: *types.SwaylockPassword) void;
 
 const c = @cImport({
     @cDefine("_POSIX_C_SOURCE", "200809L");
@@ -13,10 +22,6 @@ const c = @cImport({
     @cInclude("string.h");
     @cInclude("sys/types.h");
     @cInclude("unistd.h");
-    @cInclude("comm.h");
-    @cInclude("log.h");
-    @cInclude("password-buffer.h");
-    @cInclude("swaylock.h");
 });
 
 extern fn run_pw_backend_child() void;
@@ -36,10 +41,10 @@ fn slog(
 ) void {
     var buf: [512]u8 = undefined;
     const msg = std.fmt.bufPrintZ(&buf, fmt, args) catch return;
-    c._swaylock_log(
-        @as(c.enum_log_importance, @intCast(verbosity)),
+    _swaylock_log(
+        verbosity,
         "[%s:%d] %s",
-        c._swaylock_strip_path(src.file.ptr),
+        _swaylock_strip_path(src.file.ptr),
         @as(c_int, @intCast(src.line)),
         msg.ptr,
     );
@@ -57,10 +62,10 @@ fn slogErrno(
         msg ++ ": {s}",
         .{std.mem.sliceTo(c.strerror(err), 0)},
     ) catch return;
-    c._swaylock_log(
-        @as(c.enum_log_importance, @intCast(verbosity)),
+    _swaylock_log(
+        verbosity,
         "[%s:%d] %s",
-        c._swaylock_strip_path(src.file.ptr),
+        _swaylock_strip_path(src.file.ptr),
         @as(c_int, @intCast(src.line)),
         fmtd.ptr,
     );
@@ -72,12 +77,12 @@ fn readFull(fd: c_int, dst: []u8) isize {
         const n = c.read(fd, @ptrCast(dst[offset..].ptr), dst.len - offset);
         if (n < 0) {
             if (c.__errno_location().* == c.EINTR) continue;
-            slogErrno(c.LOG_ERROR, @src(), "read() failed");
+            slogErrno(log_err, @src(), "read() failed");
             return -1;
         } else if (n == 0) {
             if (offset == 0) return 0;
             slog(
-                c.LOG_ERROR,
+                log_err,
                 @src(),
                 "read() failed: unexpected EOF",
                 .{},
@@ -99,7 +104,7 @@ fn writeFull(fd: c_int, src: []const u8) bool {
         );
         if (n <= 0) {
             if (c.__errno_location().* == c.EINTR) continue;
-            slogErrno(c.LOG_ERROR, @src(), "write() failed");
+            slogErrno(log_err, @src(), "write() failed");
             return false;
         }
         offset += @intCast(n);
@@ -141,7 +146,7 @@ fn commRead(
     const plen: usize = loadLe32(&plen_buf);
     if (plen > comm_max_payload) {
         slog(
-            c.LOG_ERROR,
+            log_err,
             @src(),
             "comm_read: payload too large: {d}",
             .{plen},
@@ -153,7 +158,7 @@ fn commRead(
     if (plen > 0) {
         buf = @ptrCast(c.malloc(plen + 1));
         if (buf == null) {
-            slog(c.LOG_ERROR, @src(), "allocation failed", .{});
+            slog(log_err, @src(), "allocation failed", .{});
             payload.* = null;
             return -1;
         }
@@ -222,37 +227,37 @@ export fn get_comm_reply_fd() c_int {
 
 /// Clears and sends the password buffer as a COMM_MSG_PASSWORD frame.
 /// The password buffer is always cleared before returning.
-export fn write_comm_password(pw: *c.swaylock_password) bool {
+export fn write_comm_password(pw: *types.SwaylockPassword) bool {
     const size = pw.len + 1;
-    const copy = c.password_buffer_create(size);
+    const copy = password_buffer_create(size);
     if (copy == null) {
-        c.clear_password_buffer(pw);
+        clear_password_buffer(pw);
         return false;
     }
-    _ = c.memcpy(copy, pw.buffer, size);
-    c.clear_password_buffer(pw);
+    @memcpy(copy[0..size], pw.buffer[0..size]);
+    clear_password_buffer(pw);
     const ok = commWrite(
         comm_fds[0][1],
-        c.COMM_MSG_PASSWORD,
+        types.CommMsg.password,
         copy,
         size,
     );
-    c.password_buffer_destroy(copy, size);
+    password_buffer_destroy(copy, size);
     return ok;
 }
 
 export fn spawn_comm_child() bool {
     if (c.pipe(&comm_fds[0][0]) != 0) {
-        slogErrno(c.LOG_ERROR, @src(), "failed to create pipe");
+        slogErrno(log_err, @src(), "failed to create pipe");
         return false;
     }
     if (c.pipe(&comm_fds[1][0]) != 0) {
-        slogErrno(c.LOG_ERROR, @src(), "failed to create pipe");
+        slogErrno(log_err, @src(), "failed to create pipe");
         return false;
     }
     const child = c.fork();
     if (child < 0) {
-        slogErrno(c.LOG_ERROR, @src(), "failed to fork");
+        slogErrno(log_err, @src(), "failed to fork");
         return false;
     } else if (child == 0) {
         _ = c.signal(c.SIGUSR1, c.SIG_IGN);

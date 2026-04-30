@@ -4,11 +4,10 @@
 const builtin = @import("builtin");
 const opts = @import("cairo_options");
 
-const c = @cImport({
-    @cInclude("stdint.h");
-    @cInclude("cairo/cairo.h");
-    @cInclude("wayland-client.h");
-});
+const types = @import("types");
+
+// No local C imports needed — cairo/wayland types come from types.c.
+const c = types.c;
 
 // Minimal hand-rolled declarations for the gdk-pixbuf symbols needed
 // by gdk_cairo_image_surface_create_from_pixbuf. Zig 0.16's aro

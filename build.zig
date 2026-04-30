@@ -193,6 +193,30 @@ pub fn build(b: *std.Build) void {
         .proto_h_dir = proto_h_dir,
     };
 
+    // types_mod provides Zig-native shared type definitions that
+    // replace the local C headers.  It has no mutable global state
+    // so it can safely be compiled into multiple separate objects
+    // without causing linker conflicts.
+    const types_mod = b.createModule(.{
+        .root_source_file = b.path("types.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    types_mod.addIncludePath(proto_h_dir);
+    for (sys_includes.items) |flag| {
+        const fi = std.mem.trim(u8, flag, " \t\n\r");
+        if (std.mem.startsWith(u8, fi, "-I")) {
+            const path = fi[2..];
+            types_mod.addSystemIncludePath(.{ .cwd_relative = path });
+            if (std.fs.path.dirname(path)) |parent| {
+                types_mod.addSystemIncludePath(
+                    .{ .cwd_relative = parent },
+                );
+            }
+        }
+    }
+
     // exe_mod carries library links; objects are added as LazyPaths
     // from the cc compilation steps above.
     const exe_mod = b.createModule(.{
@@ -223,6 +247,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     cairo_mod.addImport("cairo_options", cairo_options.createModule());
+    cairo_mod.addImport("types", types_mod);
     cairo_mod.addIncludePath(b.path("include"));
     cairo_mod.addIncludePath(proto_h_dir);
     for (sys_includes.items) |flag| {
@@ -250,6 +275,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
+    seat_mod.addImport("types", types_mod);
     seat_mod.addIncludePath(b.path("include"));
     seat_mod.addIncludePath(proto_h_dir);
     for (sys_includes.items) |flag| {
@@ -277,6 +303,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
+    pool_buffer_mod.addImport("types", types_mod);
     pool_buffer_mod.addIncludePath(b.path("include"));
     pool_buffer_mod.addIncludePath(proto_h_dir);
     for (sys_includes.items) |flag| {
@@ -315,6 +342,7 @@ pub fn build(b: *std.Build) void {
         "background_image_options",
         bg_image_options.createModule(),
     );
+    bg_image_mod.addImport("types", types_mod);
     bg_image_mod.addIncludePath(b.path("include"));
     bg_image_mod.addIncludePath(proto_h_dir);
     for (sys_includes.items) |flag| {
@@ -344,6 +372,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
+    loop_mod.addImport("types", types_mod);
     loop_mod.addIncludePath(b.path("include"));
     loop_mod.addIncludePath(proto_h_dir);
     for (sys_includes.items) |flag| {
@@ -389,6 +418,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     render_mod.addImport("render_options", render_options.createModule());
+    render_mod.addImport("types", types_mod);
     render_mod.addIncludePath(b.path("include"));
     render_mod.addIncludePath(proto_h_dir);
     for (sys_includes.items) |flag| {
@@ -416,6 +446,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     main_mod.addImport("main_options", main_options.createModule());
+    main_mod.addImport("types", types_mod);
     main_mod.addIncludePath(b.path("include"));
     main_mod.addIncludePath(proto_h_dir);
     for (sys_includes.items) |flag| {
@@ -444,6 +475,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
+    password_mod.addImport("types", types_mod);
     password_mod.addIncludePath(b.path("include"));
     password_mod.addIncludePath(proto_h_dir);
     for (sys_includes.items) |flag| {
@@ -470,6 +502,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
+    comm_mod.addImport("types", types_mod);
     comm_mod.addIncludePath(b.path("include"));
     comm_mod.addIncludePath(proto_h_dir);
     for (sys_includes.items) |flag| {
@@ -497,6 +530,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     log_mod.addImport("log_options", log_options.createModule());
+    log_mod.addImport("types", types_mod);
     const log_obj = b.addObject(.{
         .name = "log",
         .root_module = log_mod,
@@ -518,6 +552,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .link_libc = true,
         });
+        pam_mod.addImport("types", types_mod);
         pam_mod.addIncludePath(b.path("include"));
         pam_mod.addIncludePath(proto_h_dir);
         for (sys_includes.items) |flag| {

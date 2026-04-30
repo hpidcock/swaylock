@@ -4,15 +4,14 @@
 
 const std = @import("std");
 const opts = @import("background_image_options");
+const types = @import("types");
 
-const c = @cImport({
-    @cDefine("_POSIX_C_SOURCE", "200809L");
-    @cInclude("stdlib.h");
-    @cInclude("string.h");
-    @cInclude("cairo.h");
-    @cInclude("background-image.h");
-    @cInclude("log.h");
-});
+// No local C imports needed — cairo types come from types.c.
+const c = types.c;
+
+const log_err: c_int = @intFromEnum(types.LogImportance.err);
+extern fn _swaylock_log(verbosity: c_int, fmt: [*c]const u8, ...) void;
+extern fn _swaylock_strip_path(filepath: [*c]const u8) [*c]const u8;
 
 // Minimal hand-rolled declarations for the gdk-pixbuf/glib symbols
 // needed by load_background_image. Zig 0.16's aro C-frontend cannot
@@ -40,48 +39,48 @@ extern fn g_object_unref(object: ?*anyopaque) void;
 /// Formats a message and passes it to the swaylock logger,
 /// attaching the source location captured at the call site.
 fn slog(
-    verbosity: anytype,
+    verbosity: c_int,
     src: std.builtin.SourceLocation,
     comptime fmt: []const u8,
     args: anytype,
 ) void {
     var buf: [512]u8 = undefined;
     const msg = std.fmt.bufPrintZ(&buf, fmt, args) catch return;
-    c._swaylock_log(
-        @as(c.enum_log_importance, @intCast(verbosity)),
+    _swaylock_log(
+        verbosity,
         "[%s:%d] %s",
-        c._swaylock_strip_path(src.file.ptr),
+        _swaylock_strip_path(src.file.ptr),
         @as(c_int, @intCast(src.line)),
         msg.ptr,
     );
 }
 
 /// Parses a background mode string and returns the corresponding
-/// enum value, or BACKGROUND_MODE_INVALID on an unknown string.
+/// enum value, or .invalid on an unknown string.
 pub export fn parse_background_mode(
     mode: [*c]const u8,
-) c.enum_background_mode {
+) types.BackgroundMode {
     const s = std.mem.span(mode);
     if (std.mem.eql(u8, s, "stretch")) {
-        return c.BACKGROUND_MODE_STRETCH;
+        return types.BackgroundMode.stretch;
     } else if (std.mem.eql(u8, s, "fill")) {
-        return c.BACKGROUND_MODE_FILL;
+        return types.BackgroundMode.fill;
     } else if (std.mem.eql(u8, s, "fit")) {
-        return c.BACKGROUND_MODE_FIT;
+        return types.BackgroundMode.fit;
     } else if (std.mem.eql(u8, s, "center")) {
-        return c.BACKGROUND_MODE_CENTER;
+        return types.BackgroundMode.center;
     } else if (std.mem.eql(u8, s, "tile")) {
-        return c.BACKGROUND_MODE_TILE;
+        return types.BackgroundMode.tile;
     } else if (std.mem.eql(u8, s, "solid_color")) {
-        return c.BACKGROUND_MODE_SOLID_COLOR;
+        return types.BackgroundMode.solid_color;
     }
     slog(
-        c.LOG_ERROR,
+        log_err,
         @src(),
         "Unsupported background mode: {s}",
         .{s},
     );
-    return c.BACKGROUND_MODE_INVALID;
+    return types.BackgroundMode.invalid;
 }
 
 /// Loads a background image from path. When compiled with
@@ -102,7 +101,7 @@ pub export fn load_background_image(
             else
                 "unknown error";
             slog(
-                c.LOG_ERROR,
+                log_err,
                 @src(),
                 "Failed to load background image ({s}).",
                 .{msg},
@@ -120,7 +119,7 @@ pub export fn load_background_image(
     }
     if (image == null) {
         slog(
-            c.LOG_ERROR,
+            log_err,
             @src(),
             "Failed to read background image.",
             .{},
@@ -134,14 +133,14 @@ pub export fn load_background_image(
         );
         if (comptime opts.have_gdk_pixbuf) {
             slog(
-                c.LOG_ERROR,
+                log_err,
                 @src(),
                 "Failed to read background image: {s}.",
                 .{status_str},
             );
         } else {
             slog(
-                c.LOG_ERROR,
+                log_err,
                 @src(),
                 "Failed to read background image: {s}.\n" ++
                     "Swaylock was compiled without gdk_pixbuf " ++
@@ -157,12 +156,12 @@ pub export fn load_background_image(
 
 /// Renders image onto cairo using the given mode, scaling it to
 /// fit within buffer_width x buffer_height.
-/// BACKGROUND_MODE_SOLID_COLOR and BACKGROUND_MODE_INVALID are
-/// not valid here and will trigger unreachable.
+/// .solid_color and .invalid are not valid here and will trigger
+/// unreachable.
 pub export fn render_background_image(
     cairo: ?*c.cairo_t,
     image: ?*c.cairo_surface_t,
-    mode: c.enum_background_mode,
+    mode: types.BackgroundMode,
     buffer_width: c_int,
     buffer_height: c_int,
 ) void {
@@ -177,11 +176,11 @@ pub export fn render_background_image(
 
     c.cairo_save(cairo);
     switch (mode) {
-        c.BACKGROUND_MODE_STRETCH => {
+        .stretch => {
             c.cairo_scale(cairo, bw / width, bh / height);
             c.cairo_set_source_surface(cairo, image, 0, 0);
         },
-        c.BACKGROUND_MODE_FILL => {
+        .fill => {
             const window_ratio = bw / bh;
             const bg_ratio = width / height;
             if (window_ratio > bg_ratio) {
@@ -204,7 +203,7 @@ pub export fn render_background_image(
                 );
             }
         },
-        c.BACKGROUND_MODE_FIT => {
+        .fit => {
             const window_ratio = bw / bh;
             const bg_ratio = width / height;
             if (window_ratio > bg_ratio) {
@@ -227,7 +226,7 @@ pub export fn render_background_image(
                 );
             }
         },
-        c.BACKGROUND_MODE_CENTER => {
+        .center => {
             // Align to integer pixel boundaries to prevent clarity
             // loss on odd-sized images.
             c.cairo_set_source_surface(
@@ -237,7 +236,7 @@ pub export fn render_background_image(
                 std.math.trunc(bh / 2.0 - height / 2.0),
             );
         },
-        c.BACKGROUND_MODE_TILE => {
+        .tile => {
             const pattern =
                 c.cairo_pattern_create_for_surface(image);
             c.cairo_pattern_set_extend(
