@@ -81,6 +81,8 @@ static int handle_conversation(
 	struct pam_response **resp, void *data)
 {
 	struct conv_state *state = data;
+	swaylock_log(LOG_DEBUG,
+		"handle_conversation: num_msg=%d", num_msg);
 	struct pam_response *pam_reply =
 		calloc(num_msg, sizeof(struct pam_response));
 	if (!pam_reply) {
@@ -89,9 +91,23 @@ static int handle_conversation(
 	}
 	*resp = pam_reply;
 	for (int i = 0; i < num_msg; i++) {
+		swaylock_log(LOG_DEBUG,
+			"handle_conversation: msg[%d] style=%d",
+			i, msg[i]->msg_style);
 		switch (msg[i]->msg_style) {
 		case PAM_PROMPT_ECHO_OFF:
 		case PAM_PROMPT_ECHO_ON: {
+			/* Tell the main process we are waiting for a new
+			 * credential.  If it was in AUTH_STATE_VALIDATING
+			 * this transitions it to AUTH_STATE_INVALID
+			 * ("Wrong") and then back to IDLE so the user
+			 * can type again. */
+			uint8_t stage_byte = AUTHD_STAGE_CHALLENGE;
+			comm_child_write(COMM_MSG_STAGE,
+				(char *)&stage_byte, sizeof(stage_byte));
+			swaylock_log(LOG_DEBUG,
+				"handle_conversation: PAM_PROMPT"
+				" sent STAGE, waiting for password");
 			char *payload = NULL;
 			size_t len = 0;
 			int type;
@@ -105,9 +121,12 @@ static int handle_conversation(
 					payload = NULL;
 				}
 			} while (type != COMM_MSG_PASSWORD);
-			pam_reply[i].resp = strdup(payload);
-			clear_buffer(payload, len);
-			free(payload);
+			swaylock_log(LOG_DEBUG,
+					"handle_conversation: PAM_PROMPT"
+					" got password (len=%zu)", len);
+				pam_reply[i].resp = strdup(payload);
+				clear_buffer(payload, len);
+				free(payload);
 			if (!pam_reply[i].resp) {
 				swaylock_log(LOG_ERROR, "allocation failed");
 				return PAM_ABORT;
@@ -139,10 +158,23 @@ static int handle_conversation(
 		}
 #endif
 		case PAM_TEXT_INFO:
+			swaylock_log(LOG_DEBUG,
+				"handle_conversation: PAM_TEXT_INFO: %s",
+				msg[i]->msg ? msg[i]->msg : "(null)");
+			break;
 		case PAM_ERROR_MSG:
+			swaylock_log(LOG_DEBUG,
+				"handle_conversation: PAM_ERROR_MSG: %s",
+				msg[i]->msg ? msg[i]->msg : "(null)");
+			break;
+		default:
+			swaylock_log(LOG_DEBUG,
+				"handle_conversation: unknown"
+				" msg_style=%d", msg[i]->msg_style);
 			break;
 		}
 	}
+	swaylock_log(LOG_DEBUG, "handle_conversation: returning PAM_SUCCESS");
 	return PAM_SUCCESS;
 }
 
@@ -163,6 +195,8 @@ static char *handle_gdm_json(
 		return NULL;
 	}
 	const char *type = type_item->valuestring;
+	swaylock_log(LOG_DEBUG,
+		"handle_gdm_json: type=%s", type);
 
 	cJSON *response = NULL;
 	if (strcmp(type, "hello") == 0) {
@@ -244,6 +278,9 @@ static char *handle_gdm_json(
 			event, "type");
 		const char *etype = cJSON_IsString(evt_type)
 			? evt_type->valuestring : "";
+
+		swaylock_log(LOG_DEBUG,
+			"handle_gdm_json: event type=%s", etype);
 
 		if (strcmp(etype, "brokersReceived") == 0) {
 			cJSON *infos = cJSON_GetObjectItemCaseSensitive(
@@ -337,6 +374,9 @@ static char *handle_gdm_json(
 				(char *)&stage_byte, sizeof(stage_byte));
 
 		} else if (strcmp(etype, "startAuthentication") == 0) {
+			swaylock_log(LOG_DEBUG,
+				"handle_gdm_json: startAuthentication"
+				" -> sending COMM_MSG_STAGE challenge");
 			uint8_t stage_byte = AUTHD_STAGE_CHALLENGE;
 			comm_child_write(COMM_MSG_STAGE,
 				(char *)&stage_byte, sizeof(stage_byte));
@@ -349,6 +389,10 @@ static char *handle_gdm_json(
 				cJSON_GetObjectItemCaseSensitive(
 				ev_resp, "access");
 			if (cJSON_IsString(access)) {
+				swaylock_log(LOG_DEBUG,
+					"handle_gdm_json: authEvent"
+					" access=%s",
+					access->valuestring);
 				if (strcmp(access->valuestring,
 						"granted") == 0) {
 					comm_child_write(
@@ -363,12 +407,22 @@ static char *handle_gdm_json(
 					char *json =
 						cJSON_PrintUnformatted(ev_resp);
 					if (json) {
+						swaylock_log(LOG_DEBUG,
+							"handle_gdm_json:"
+							" authEvent other"
+							" access, sending"
+							" AUTH_EVENT");
 						comm_child_write(
 							COMM_MSG_AUTH_EVENT,
 							json, strlen(json));
 						free(json);
 					}
 				}
+			} else {
+				swaylock_log(LOG_DEBUG,
+					"handle_gdm_json: authEvent"
+					" missing/non-string access"
+					" field — no message sent");
 			}
 		}
 		/* all event subtypes reply with eventAck */
@@ -387,6 +441,11 @@ static char *handle_gdm_json(
 			state->pending[state->pending_count++] = evt;
 			state->user_selected_sent = true;
 		}
+		swaylock_log(LOG_DEBUG,
+			"handle_gdm_json: poll"
+			" pending=%d user_sel_sent=%d",
+			state->pending_count,
+			(int)state->user_selected_sent);
 		while (state->pending_count < 64) {
 			struct pollfd pfd = {
 				.fd     = get_comm_child_fd(),
@@ -402,6 +461,10 @@ static char *handle_gdm_json(
 				free(payload);
 				break;
 			}
+			swaylock_log(LOG_DEBUG,
+				"handle_gdm_json: poll"
+				" read mtype=0x%02x plen=%zu",
+				mtype, plen);
 			cJSON *evt = NULL;
 			switch (mtype) {
 			case COMM_MSG_BROKER_SEL: {
@@ -476,10 +539,14 @@ static char *handle_gdm_json(
 			}
 		}
 		cJSON *arr = cJSON_CreateArray();
+		int nevents = state->pending_count;
 		for (int i = 0; i < state->pending_count; i++) {
 			cJSON_AddItemToArray(arr, state->pending[i]);
 		}
 		state->pending_count = 0;
+		swaylock_log(LOG_DEBUG,
+			"handle_gdm_json: pollResponse"
+			" nevents=%d", nevents);
 		response = cJSON_CreateObject();
 		cJSON_AddStringToObject(
 			response, "type", "pollResponse");
