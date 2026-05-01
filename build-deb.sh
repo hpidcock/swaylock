@@ -36,7 +36,6 @@ lxc exec "$CONTAINER" -- apt-get install -y --no-install-recommends \
 	dpkg-dev \
 	libaudit-dev \
 	libcairo2-dev \
-	libcjson-dev \
 	libgdk-pixbuf-2.0-dev \
 	libpam0g-dev \
 	libqrencode-dev \

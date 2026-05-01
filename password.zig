@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const types = @import("types.zig");
+const state = @import("state.zig");
 
 // Only stdlib needed locally — xkb constants come from types.c.
 const c = @cImport({
@@ -13,16 +14,11 @@ const c = @cImport({
 
 const wl = types.c;
 
-const log_err: i32 = @intFromEnum(types.LogImportance.err);
-const log_debug: i32 = @intFromEnum(types.LogImportance.debug);
-
 const log = @import("log.zig");
 const loop = @import("loop.zig");
 const comm = @import("comm.zig");
 const password_buffer = @import("password_buffer.zig");
 const unicode_mod = @import("unicode.zig");
-
-extern fn damage_state(state: *types.SwaylockState) void;
 
 fn backspace(pw: *types.SwaylockPassword) bool {
     if (pw.len != 0) {
@@ -52,105 +48,105 @@ fn appendCh(pw: *types.SwaylockPassword, codepoint: u32) void {
 // ── timer callbacks ──────────────────────────────────────────────────
 
 fn setInputIdle(data: ?*anyopaque) callconv(.c) void {
-    const state: *types.SwaylockState = @ptrCast(@alignCast(data));
-    state.input_idle_timer = null;
-    state.input_state = types.InputState.idle;
-    damage_state(state);
+    const g: *types.SwaylockState = @ptrCast(@alignCast(data));
+    g.input_idle_timer = null;
+    g.input_state = types.InputState.idle;
+    state.damageState(g);
 }
 
 fn setAuthIdle(data: ?*anyopaque) callconv(.c) void {
-    const state: *types.SwaylockState = @ptrCast(@alignCast(data));
-    state.auth_idle_timer = null;
-    state.auth_state = types.AuthState.idle;
-    damage_state(state);
+    const g: *types.SwaylockState = @ptrCast(@alignCast(data));
+    g.auth_idle_timer = null;
+    g.auth_state = types.AuthState.idle;
+    state.damageState(g);
 }
 
-fn scheduleInputIdle(state: *types.SwaylockState) void {
-    if (state.input_idle_timer != null)
+fn scheduleInputIdle(g: *types.SwaylockState) void {
+    if (g.input_idle_timer != null)
         _ = loop.loopRemoveTimer(
-            state.eventloop.?,
-            state.input_idle_timer.?,
+            g.eventloop.?,
+            g.input_idle_timer.?,
         );
-    state.input_idle_timer = loop.loopAddTimer(
-        state.eventloop.?,
+    g.input_idle_timer = loop.loopAddTimer(
+        g.eventloop.?,
         1500,
         setInputIdle,
-        state,
+        g,
     );
 }
 
-fn cancelInputIdle(state: *types.SwaylockState) void {
-    if (state.input_idle_timer != null) {
+fn cancelInputIdle(g: *types.SwaylockState) void {
+    if (g.input_idle_timer != null) {
         _ = loop.loopRemoveTimer(
-            state.eventloop.?,
-            state.input_idle_timer.?,
+            g.eventloop.?,
+            g.input_idle_timer.?,
         );
-        state.input_idle_timer = null;
+        g.input_idle_timer = null;
     }
 }
 
-pub fn scheduleAuthIdle(state: *types.SwaylockState) void {
-    if (state.auth_idle_timer != null)
+pub fn scheduleAuthIdle(g: *types.SwaylockState) void {
+    if (g.auth_idle_timer != null)
         _ = loop.loopRemoveTimer(
-            state.eventloop.?,
-            state.auth_idle_timer.?,
+            g.eventloop.?,
+            g.auth_idle_timer.?,
         );
-    state.auth_idle_timer = loop.loopAddTimer(
-        state.eventloop.?,
+    g.auth_idle_timer = loop.loopAddTimer(
+        g.eventloop.?,
         3000,
         setAuthIdle,
-        state,
+        g,
     );
 }
 
 fn clearPassword(data: ?*anyopaque) callconv(.c) void {
-    const state: *types.SwaylockState = @ptrCast(@alignCast(data));
-    state.clear_password_timer = null;
-    state.input_state = types.InputState.clear;
-    scheduleInputIdle(state);
-    password_buffer.clearPasswordBuffer(&state.password);
-    damage_state(state);
+    const g: *types.SwaylockState = @ptrCast(@alignCast(data));
+    g.clear_password_timer = null;
+    g.input_state = types.InputState.clear;
+    scheduleInputIdle(g);
+    password_buffer.clearPasswordBuffer(&g.password);
+    state.damageState(g);
 }
 
-fn schedulePasswordClear(state: *types.SwaylockState) void {
-    if (state.clear_password_timer != null)
+fn schedulePasswordClear(g: *types.SwaylockState) void {
+    if (g.clear_password_timer != null)
         _ = loop.loopRemoveTimer(
-            state.eventloop.?,
-            state.clear_password_timer.?,
+            g.eventloop.?,
+            g.clear_password_timer.?,
         );
-    state.clear_password_timer = loop.loopAddTimer(
-        state.eventloop.?,
+    g.clear_password_timer = loop.loopAddTimer(
+        g.eventloop.?,
         10000,
         clearPassword,
-        state,
+        g,
     );
 }
 
-fn cancelPasswordClear(state: *types.SwaylockState) void {
-    if (state.clear_password_timer != null) {
+fn cancelPasswordClear(g: *types.SwaylockState) void {
+    if (g.clear_password_timer != null) {
         _ = loop.loopRemoveTimer(
-            state.eventloop.?,
-            state.clear_password_timer.?,
+            g.eventloop.?,
+            g.clear_password_timer.?,
         );
-        state.clear_password_timer = null;
+        g.clear_password_timer = null;
     }
 }
 
 // ── submit / highlight ───────────────────────────────────────────────
 
-fn submitPassword(state: *types.SwaylockState) void {
-    if (state.args.ignore_empty and state.password.len == 0) {
+fn submitPassword(g: *types.SwaylockState) void {
+    if (g.args.ignore_empty and g.password.len == 0) {
         log.slog(
-            log_debug,
+            log.LogImportance.debug,
             @src(),
             "submit_password: skipped (ignore_empty)",
             .{},
         );
         return;
     }
-    if (state.auth_state == types.AuthState.validating) {
+    if (g.auth_state == types.AuthState.validating) {
         log.slog(
-            log_debug,
+            log.LogImportance.debug,
             @src(),
             "submit_password: skipped (already validating)",
             .{},
@@ -158,80 +154,80 @@ fn submitPassword(state: *types.SwaylockState) void {
         return;
     }
     log.slog(
-        log_debug,
+        log.LogImportance.debug,
         @src(),
         "submit_password: sending (len={d}) auth=idle -> validating",
-        .{state.password.len},
+        .{g.password.len},
     );
-    state.input_state = types.InputState.idle;
-    state.auth_state = types.AuthState.validating;
-    cancelPasswordClear(state);
-    cancelInputIdle(state);
-    if (!comm.writeCommPassword(&state.password)) {
+    g.input_state = types.InputState.idle;
+    g.auth_state = types.AuthState.validating;
+    cancelPasswordClear(g);
+    cancelInputIdle(g);
+    if (!comm.writeCommPassword(&g.password)) {
         log.slog(
-            log_debug,
+            log.LogImportance.debug,
             @src(),
             "submit_password: write failed auth=validating -> invalid",
             .{},
         );
-        state.auth_state = types.AuthState.invalid;
-        scheduleAuthIdle(state);
+        g.auth_state = types.AuthState.invalid;
+        scheduleAuthIdle(g);
     }
-    damage_state(state);
+    state.damageState(g);
 }
 
-fn updateHighlight(state: *types.SwaylockState) void {
+fn updateHighlight(g: *types.SwaylockState) void {
     // Advance a random amount between 1/4 and 3/4 of a full turn.
-    state.highlight_start =
-        (state.highlight_start +
+    g.highlight_start =
+        (g.highlight_start +
             @as(u32, @intCast(@rem(c.rand(), 1024))) + 512) % 2048;
 }
 
 // ── key handler ──────────────────────────────────────────────────────
 
 pub fn swaylockHandleKey(
-    state: *types.SwaylockState,
+    g: *types.SwaylockState,
     keysym: wl.xkb_keysym_t,
     codepoint: u32,
 ) void {
     // In broker or auth-mode selection, Up/Down navigate the list
     // and Enter confirms. Tab presses the optional button.
-    if (state.authd_active) {
-        if (state.authd_stage == types.AuthdStage.broker or
-            state.authd_stage == types.AuthdStage.auth_mode)
+    if (g.authd_active) {
+        if (g.authd_stage == types.AuthdStage.broker or
+            g.authd_stage == types.AuthdStage.auth_mode)
         {
             const is_broker =
-                state.authd_stage == types.AuthdStage.broker;
+                g.authd_stage == types.AuthdStage.broker;
             if (keysym == wl.XKB_KEY_Up) {
                 if (is_broker) {
-                    if (state.authd_sel_broker > 0)
-                        state.authd_sel_broker -= 1;
+                    if (g.authd_sel_broker > 0)
+                        g.authd_sel_broker -= 1;
                 } else {
-                    if (state.authd_sel_auth_mode > 0)
-                        state.authd_sel_auth_mode -= 1;
+                    if (g.authd_sel_auth_mode > 0)
+                        g.authd_sel_auth_mode -= 1;
                 }
-                damage_state(state);
+                state.damageState(g);
                 return;
             } else if (keysym == wl.XKB_KEY_Down) {
                 if (is_broker) {
-                    if (state.authd_sel_broker <
-                        state.authd_num_brokers - 1)
-                        state.authd_sel_broker += 1;
+                    if (g.authd_sel_broker <
+                        g.authd_num_brokers - 1)
+                        g.authd_sel_broker += 1;
                 } else {
-                    if (state.authd_sel_auth_mode <
-                        state.authd_num_auth_modes - 1)
-                        state.authd_sel_auth_mode += 1;
+                    if (g.authd_sel_auth_mode <
+                        g.authd_num_auth_modes - 1)
+                        g.authd_sel_auth_mode += 1;
                 }
-                damage_state(state);
+                state.damageState(g);
                 return;
             } else if (keysym == wl.XKB_KEY_Return or
                 keysym == wl.XKB_KEY_KP_Enter)
             {
                 if (is_broker) {
-                    const sel = state.authd_sel_broker;
-                    if (sel >= 0 and sel < state.authd_num_brokers) {
+                    const sel = g.authd_sel_broker;
+                    if (sel >= 0 and sel < g.authd_num_brokers) {
                         const id =
-                            state.authd_brokers.?[@intCast(sel)].id;
+                            g.authd_brokers.?[@intCast(sel)].id;
                         if (id != null)
                             _ = comm.commMainWrite(
                                 types.CommMsg.broker_sel,
@@ -240,12 +236,12 @@ pub fn swaylockHandleKey(
                             );
                     }
                 } else {
-                    const sel = state.authd_sel_auth_mode;
+                    const sel = g.authd_sel_auth_mode;
                     if (sel >= 0 and
-                        sel < state.authd_num_auth_modes)
+                        sel < g.authd_num_auth_modes)
                     {
                         const id =
-                            state.authd_auth_modes.?[
+                            g.authd_auth_modes.?[
                                 @intCast(sel)
                             ].id;
                         if (id != null)
@@ -262,44 +258,44 @@ pub fn swaylockHandleKey(
                 return;
             }
         }
-        if (state.authd_stage == types.AuthdStage.challenge) {
+        if (g.authd_stage == types.AuthdStage.challenge) {
             if (keysym == wl.XKB_KEY_Tab and
-                state.authd_layout.button != null)
+                g.authd_layout.button != null)
             {
                 _ = comm.commMainWrite(types.CommMsg.button, null, 0);
-                damage_state(state);
+                state.damageState(g);
                 return;
             }
         }
     }
 
     if (keysym == wl.XKB_KEY_KP_Enter or keysym == wl.XKB_KEY_Return) {
-        submitPassword(state);
+        submitPassword(g);
     } else if (keysym == wl.XKB_KEY_Delete or
         keysym == wl.XKB_KEY_BackSpace)
     {
-        if (state.xkb.control) {
-            password_buffer.clearPasswordBuffer(&state.password);
-            state.input_state = types.InputState.clear;
-            cancelPasswordClear(state);
-        } else if (backspace(&state.password) and
-            state.password.len != 0)
+        if (g.xkb.control) {
+            password_buffer.clearPasswordBuffer(&g.password);
+            g.input_state = types.InputState.clear;
+            cancelPasswordClear(g);
+        } else if (backspace(&g.password) and
+            g.password.len != 0)
         {
-            state.input_state = types.InputState.backspace;
-            schedulePasswordClear(state);
-            updateHighlight(state);
+            g.input_state = types.InputState.backspace;
+            schedulePasswordClear(g);
+            updateHighlight(g);
         } else {
-            state.input_state = types.InputState.clear;
-            cancelPasswordClear(state);
+            g.input_state = types.InputState.clear;
+            cancelPasswordClear(g);
         }
-        scheduleInputIdle(state);
-        damage_state(state);
+        scheduleInputIdle(g);
+        state.damageState(g);
     } else if (keysym == wl.XKB_KEY_Escape) {
-        password_buffer.clearPasswordBuffer(&state.password);
-        state.input_state = types.InputState.clear;
-        cancelPasswordClear(state);
-        scheduleInputIdle(state);
-        damage_state(state);
+        password_buffer.clearPasswordBuffer(&g.password);
+        g.input_state = types.InputState.clear;
+        cancelPasswordClear(g);
+        scheduleInputIdle(g);
+        state.damageState(g);
     } else if (keysym == wl.XKB_KEY_Caps_Lock or
         keysym == wl.XKB_KEY_Shift_L or
         keysym == wl.XKB_KEY_Shift_R or
@@ -312,31 +308,31 @@ pub fn swaylockHandleKey(
         keysym == wl.XKB_KEY_Super_L or
         keysym == wl.XKB_KEY_Super_R)
     {
-        state.input_state = types.InputState.neutral;
-        schedulePasswordClear(state);
-        scheduleInputIdle(state);
-        damage_state(state);
+        g.input_state = types.InputState.neutral;
+        schedulePasswordClear(g);
+        scheduleInputIdle(g);
+        state.damageState(g);
     } else if ((keysym == wl.XKB_KEY_m or
         keysym == wl.XKB_KEY_d or
-        keysym == wl.XKB_KEY_j) and state.xkb.control)
+        keysym == wl.XKB_KEY_j) and g.xkb.control)
     {
-        submitPassword(state);
+        submitPassword(g);
     } else if ((keysym == wl.XKB_KEY_c or
-        keysym == wl.XKB_KEY_u) and state.xkb.control)
+        keysym == wl.XKB_KEY_u) and g.xkb.control)
     {
-        password_buffer.clearPasswordBuffer(&state.password);
-        state.input_state = types.InputState.clear;
-        cancelPasswordClear(state);
-        scheduleInputIdle(state);
-        damage_state(state);
+        password_buffer.clearPasswordBuffer(&g.password);
+        g.input_state = types.InputState.clear;
+        cancelPasswordClear(g);
+        scheduleInputIdle(g);
+        state.damageState(g);
     } else {
         if (codepoint != 0) {
-            appendCh(&state.password, codepoint);
-            state.input_state = types.InputState.letter;
-            schedulePasswordClear(state);
-            scheduleInputIdle(state);
-            updateHighlight(state);
-            damage_state(state);
+            appendCh(&g.password, codepoint);
+            g.input_state = types.InputState.letter;
+            schedulePasswordClear(g);
+            scheduleInputIdle(g);
+            updateHighlight(g);
+            state.damageState(g);
         }
     }
 }

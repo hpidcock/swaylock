@@ -249,6 +249,11 @@ pub fn build(b: *std.Build) void {
     main_mod.addImport("cairo_options", gfx_options_mod);
     main_mod.addImport("background_image_options", gfx_options_mod);
     main_mod.addImport("render_options", render_options.createModule());
+    const clap_dep = b.dependency("clap", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    main_mod.addImport("clap", clap_dep.module("clap"));
     main_mod.addIncludePath(b.path("include"));
     main_mod.addIncludePath(proto_h_dir);
     for (sys_includes.items) |flag| {

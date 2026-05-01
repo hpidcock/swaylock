@@ -1,14 +1,8 @@
 //! pam.zig – Zig port of pam.c.
 //! PAM authentication and GDM/authd JSON protocol handling.
-//! All JSON processing uses std.json in place of cJSON.
 
 const std = @import("std");
 const types = @import("types.zig");
-
-const log_err: i32 = @intFromEnum(types.LogImportance.err);
-const log_info: i32 = @intFromEnum(types.LogImportance.info);
-const log_debug: i32 = @intFromEnum(types.LogImportance.debug);
-
 const log = @import("log.zig");
 const comm = @import("comm.zig");
 const password_buffer = @import("password_buffer.zig");
@@ -272,9 +266,9 @@ fn handleGdmJson(
         .{},
     ) catch {
         log.slog(
-            log_err,
+            log.LogImportance.err,
             @src(),
-            "cJSON_Parse failed: {s}",
+            "json parse failed: {s}",
             .{input[0..@min(80, input.len)]},
         );
         return null;
@@ -289,7 +283,7 @@ fn handleGdmJson(
         .string => |s| s,
         else => return null,
     };
-    log.slog(log_debug, @src(), "handle_gdm_json: type={s}", .{tp});
+    log.slog(log.LogImportance.debug, @src(), "handle_gdm_json: type={s}", .{tp});
 
     if (std.mem.eql(u8, tp, "hello")) {
         return jsonStringifyC(GdmResponse{ .hello = .{} });
@@ -320,7 +314,7 @@ fn handleGdmJson(
             else => "",
         };
         log.slog(
-            log_debug,
+            log.LogImportance.debug,
             @src(),
             "handle_gdm_json: event type={s}",
             .{etype},
@@ -424,7 +418,7 @@ fn handleGdmJson(
             );
         } else if (std.mem.eql(u8, etype, "startAuthentication")) {
             log.slog(
-                log_debug,
+                log.LogImportance.debug,
                 @src(),
                 "handle_gdm_json: startAuthentication" ++
                     " -> sending COMM_MSG_STAGE challenge",
@@ -452,7 +446,7 @@ fn handleGdmJson(
                     else => "(none)",
                 };
                 log.slog(
-                    log_debug,
+                    log.LogImportance.debug,
                     @src(),
                     "handle_gdm_json: authEvent access={s} -> AUTH_EVENT",
                     .{access_str},
@@ -471,7 +465,7 @@ fn handleGdmJson(
             state.user_selected_sent = true;
         }
         log.slog(
-            log_debug,
+            log.LogImportance.debug,
             @src(),
             "handle_gdm_json: poll pending={d} user_sel_sent={d}",
             .{ state.pending_count, @intFromBool(state.user_selected_sent) },
@@ -494,7 +488,7 @@ fn handleGdmJson(
             }
             const mtype: u8 = @intCast(mtype_raw);
             log.slog(
-                log_debug,
+                log.LogImportance.debug,
                 @src(),
                 "handle_gdm_json: poll read mtype=0x{x:0>2} plen={d}",
                 .{ mtype, plen },
@@ -572,7 +566,7 @@ fn handleGdmJson(
         }
 
         log.slog(
-            log_debug,
+            log.LogImportance.debug,
             @src(),
             "handle_gdm_json: pollResponse nevents={d}",
             .{state.pending_count},
@@ -596,13 +590,13 @@ fn handleConversation(
     data: ?*anyopaque,
 ) callconv(.c) c_int {
     const state: *ConvState = @ptrCast(@alignCast(data.?));
-    log.slog(log_debug, @src(), "handle_conversation: num_msg={d}", .{num_msg});
+    log.slog(log.LogImportance.debug, @src(), "handle_conversation: num_msg={d}", .{num_msg});
 
     const pam_reply: [*c]c.pam_response = @ptrCast(@alignCast(
         c.calloc(@intCast(num_msg), @sizeOf(c.pam_response)),
     ));
     if (pam_reply == null) {
-        log.slog(log_err, @src(), "allocation failed", .{});
+        log.slog(log.LogImportance.err, @src(), "allocation failed", .{});
         return c.PAM_ABORT;
     }
     resp.* = pam_reply;
@@ -611,7 +605,7 @@ fn handleConversation(
     while (i < num_msg) : (i += 1) {
         const idx: usize = @intCast(i);
         log.slog(
-            log_debug,
+            log.LogImportance.debug,
             @src(),
             "handle_conversation: msg[{d}] style={d}",
             .{ i, msg[idx].*.msg_style },
@@ -635,7 +629,7 @@ fn handleConversation(
                     @sizeOf(u8),
                 );
                 log.slog(
-                    log_debug,
+                    log.LogImportance.debug,
                     @src(),
                     "handle_conversation: PAM_PROMPT" ++
                         " sent STAGE, waiting for password",
@@ -653,7 +647,7 @@ fn handleConversation(
                     payload = null;
                 }
                 log.slog(
-                    log_debug,
+                    log.LogImportance.debug,
                     @src(),
                     "handle_conversation: PAM_PROMPT got password (len={d})",
                     .{len},
@@ -663,12 +657,12 @@ fn handleConversation(
                 password_buffer.clearBuffer(payload, len);
                 c.free(@ptrCast(payload));
                 if (pam_reply[idx].resp == null) {
-                    log.slog(log_err, @src(), "allocation failed", .{});
+                    log.slog(log.LogImportance.err, @src(), "allocation failed", .{});
                     return c.PAM_ABORT;
                 }
             },
             c.PAM_TEXT_INFO => log.slog(
-                log_debug,
+                log.LogImportance.debug,
                 @src(),
                 "handle_conversation: PAM_TEXT_INFO: {s}",
                 .{if (msg[idx].*.msg != null)
@@ -677,7 +671,7 @@ fn handleConversation(
                     "(null)"},
             ),
             c.PAM_ERROR_MSG => log.slog(
-                log_debug,
+                log.LogImportance.debug,
                 @src(),
                 "handle_conversation: PAM_ERROR_MSG: {s}",
                 .{if (msg[idx].*.msg != null)
@@ -713,7 +707,7 @@ fn handleConversation(
                     }
                 }
                 log.slog(
-                    log_debug,
+                    log.LogImportance.debug,
                     @src(),
                     "handle_conversation: unknown msg_style={d}",
                     .{msg[idx].*.msg_style},
@@ -722,7 +716,7 @@ fn handleConversation(
         }
     }
     log.slog(
-        log_debug,
+        log.LogImportance.debug,
         @src(),
         "handle_conversation: returning PAM_SUCCESS",
         .{},
@@ -744,7 +738,7 @@ pub fn runPwBackendChild() void {
 
     const passwd_ptr = c.getpwuid(c.getuid());
     if (passwd_ptr == null) {
-        log.slog(log_err, @src(), "getpwuid failed", .{});
+        log.slog(log.LogImportance.err, @src(), "getpwuid failed", .{});
         c.exit(c.EXIT_FAILURE);
     }
     const username = passwd_ptr.*.pw_name;
@@ -762,11 +756,11 @@ pub fn runPwBackendChild() void {
         &conv,
         &auth_handle,
     ) != c.PAM_SUCCESS) {
-        log.slog(log_err, @src(), "pam_start failed", .{});
+        log.slog(log.LogImportance.err, @src(), "pam_start failed", .{});
         c.exit(c.EXIT_FAILURE);
     }
     log.slog(
-        log_debug,
+        log.LogImportance.debug,
         @src(),
         "Prepared to authorise user {s}",
         .{std.mem.span(username)},
@@ -779,7 +773,7 @@ pub fn runPwBackendChild() void {
             _ = comm.commChildWrite(types.CommMsg.auth_result, "\x01", 1);
         } else {
             log.slog(
-                log_err,
+                log.LogImportance.err,
                 @src(),
                 "pam_authenticate failed: {s}",
                 .{std.mem.span(getPamAuthError(pam_status))},
@@ -792,7 +786,7 @@ pub fn runPwBackendChild() void {
     _ = c.pam_setcred(auth_handle, c.PAM_REFRESH_CRED);
 
     if (c.pam_end(auth_handle, pam_status) != c.PAM_SUCCESS) {
-        log.slog(log_err, @src(), "pam_end failed", .{});
+        log.slog(log.LogImportance.err, @src(), "pam_end failed", .{});
         c.exit(c.EXIT_FAILURE);
     }
     c.exit(if (pam_status == c.PAM_SUCCESS)

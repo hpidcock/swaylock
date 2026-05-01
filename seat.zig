@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const types = @import("types.zig");
+const state = @import("state.zig");
 
 /// Local C imports: only sys/mman.h for mmap/munmap.
 /// All Wayland and xkbcommon types are accessed via types.c to
@@ -16,12 +17,9 @@ const c = @cImport({
 
 const wl = types.c;
 
-const log_err: i32 = @intFromEnum(types.LogImportance.err);
-
 const log = @import("log.zig");
 const loop = @import("loop.zig");
 const password_mod = @import("password.zig");
-extern fn damage_state(state: *types.SwaylockState) void;
 
 fn keyboardKeymap(
     data: ?*anyopaque,
@@ -32,7 +30,7 @@ fn keyboardKeymap(
 ) callconv(.c) void {
     _ = wl_keyboard;
     const seat: *types.SwaylockSeat = @ptrCast(@alignCast(data.?));
-    const state = seat.state.?;
+    const g = seat.g.?;
     var keymap: ?*types.c.xkb_keymap = null;
     var xkb_state: ?*types.c.xkb_state = null;
     switch (format) {
@@ -57,7 +55,7 @@ fn keyboardKeymap(
             {
                 _ = std.c.close(fd);
                 log.slog(
-                    log_err,
+                    log.LogImportance.err,
                     @src(),
                     "Unable to initialise keymap shm, aborting",
                     .{},
@@ -66,7 +64,7 @@ fn keyboardKeymap(
             }
             const map_shm: [*]const u8 = @ptrCast(raw.?);
             keymap = types.c.xkb_keymap_new_from_buffer(
-                state.xkb.context,
+                g.xkb.context,
                 map_shm,
                 shm_size,
                 types.c.XKB_KEYMAP_FORMAT_TEXT_V1,
@@ -80,10 +78,10 @@ fn keyboardKeymap(
         else => {},
     }
     _ = std.c.close(fd);
-    types.c.xkb_keymap_unref(state.xkb.keymap);
-    types.c.xkb_state_unref(state.xkb.state);
-    state.xkb.keymap = keymap;
-    state.xkb.state = xkb_state;
+    types.c.xkb_keymap_unref(g.xkb.keymap);
+    types.c.xkb_state_unref(g.xkb.state);
+    g.xkb.keymap = keymap;
+    g.xkb.state = xkb_state;
 }
 
 fn keyboardEnter(
@@ -114,14 +112,14 @@ fn keyboardLeave(
 
 fn keyboardRepeat(data: ?*anyopaque) callconv(.c) void {
     const seat: *types.SwaylockSeat = @ptrCast(@alignCast(data.?));
-    const state = seat.state.?;
+    const g = seat.g.?;
     seat.repeat_timer = loop.loopAddTimer(
-        state.eventloop.?,
+        g.eventloop.?,
         seat.repeat_period_ms,
         keyboardRepeat,
         seat,
     );
-    password_mod.swaylockHandleKey(state, seat.repeat_sym, seat.repeat_codepoint);
+    password_mod.swaylockHandleKey(g, seat.repeat_sym, seat.repeat_codepoint);
 }
 
 fn keyboardKey(
@@ -136,26 +134,26 @@ fn keyboardKey(
     _ = serial;
     _ = time;
     const seat: *types.SwaylockSeat = @ptrCast(@alignCast(data.?));
-    const state = seat.state.?;
-    if (state.xkb.state == null) return;
+    const g = seat.g.?;
+    if (g.xkb.state == null) return;
     const pressed = @as(
         u32,
         @intCast(types.c.WL_KEYBOARD_KEY_STATE_PRESSED),
     );
     const sym = types.c.xkb_state_key_get_one_sym(
-        state.xkb.state,
+        g.xkb.state,
         key + 8,
     );
     const keycode: u32 = if (key_state_raw == pressed) key + 8 else 0;
     const codepoint = types.c.xkb_state_key_get_utf32(
-        state.xkb.state,
+        g.xkb.state,
         keycode,
     );
     if (key_state_raw == pressed)
-        password_mod.swaylockHandleKey(state, sym, codepoint);
+        password_mod.swaylockHandleKey(g, sym, codepoint);
     if (seat.repeat_timer != null) {
         _ = loop.loopRemoveTimer(
-            state.eventloop.?,
+            g.eventloop.?,
             seat.repeat_timer.?,
         );
         seat.repeat_timer = null;
@@ -164,7 +162,7 @@ fn keyboardKey(
         seat.repeat_sym = sym;
         seat.repeat_codepoint = codepoint;
         seat.repeat_timer = loop.loopAddTimer(
-            state.eventloop.?,
+            g.eventloop.?,
             seat.repeat_delay_ms,
             keyboardRepeat,
             seat,
@@ -184,15 +182,15 @@ fn keyboardModifiers(
     _ = wl_keyboard;
     _ = serial;
     const seat: *types.SwaylockSeat = @ptrCast(@alignCast(data.?));
-    const state = seat.state.?;
-    if (state.xkb.state == null) return;
+    const g = seat.g.?;
+    if (g.xkb.state == null) return;
     const layout_same = types.c.xkb_state_layout_index_is_active(
-        state.xkb.state,
+        g.xkb.state,
         group,
         types.c.XKB_STATE_LAYOUT_EFFECTIVE,
     );
     _ = types.c.xkb_state_update_mask(
-        state.xkb.state,
+        g.xkb.state,
         mods_depressed,
         mods_latched,
         mods_locked,
@@ -201,17 +199,17 @@ fn keyboardModifiers(
         group,
     );
     const caps_lock_int = types.c.xkb_state_mod_name_is_active(
-        state.xkb.state,
+        g.xkb.state,
         types.c.XKB_MOD_NAME_CAPS,
         types.c.XKB_STATE_MODS_LOCKED,
     );
     const caps_lock = caps_lock_int != 0;
-    if (caps_lock != state.xkb.caps_lock or layout_same == 0) {
-        state.xkb.caps_lock = caps_lock;
-        damage_state(state);
+    if (caps_lock != g.xkb.caps_lock or layout_same == 0) {
+        g.xkb.caps_lock = caps_lock;
+        state.damageState(g);
     }
-    state.xkb.control = types.c.xkb_state_mod_name_is_active(
-        state.xkb.state,
+    g.xkb.control = types.c.xkb_state_mod_name_is_active(
+        g.xkb.state,
         types.c.XKB_MOD_NAME_CTRL,
         types.c.XKB_STATE_MODS_DEPRESSED |
             types.c.XKB_STATE_MODS_LATCHED,

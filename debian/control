@@ -14,7 +14,6 @@ Build-Depends:
  libgdk-pixbuf-2.0-dev,
  libaudit-dev,
  libpam0g-dev,
- libcjson-dev,
  libqrencode-dev,
  scdoc,
 Standards-Version: 4.7.0

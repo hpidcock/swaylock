@@ -50,7 +50,6 @@
               cairo
               gdk-pixbuf
               linux-pam-sbindir
-              cjson
               qrencode
             ];
           };

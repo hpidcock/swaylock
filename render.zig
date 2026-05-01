@@ -11,7 +11,6 @@ const qrencode = if (opts.have_qrencode) @cImport({
     @cInclude("qrencode.h");
 }) else struct {};
 
-const log_err: i32 = @intFromEnum(types.LogImportance.err);
 const log = @import("log.zig");
 const background_image = @import("background-image.zig");
 const cairo_mod = @import("cairo.zig");
@@ -79,7 +78,7 @@ fn render_debug_overlay(surface: *types.SwaylockSurface) void {
     // enabled; Zig does not type-check unreachable comptime branches,
     // so the overlay-only fields on SwaylockSurface are safe here.
     if (comptime opts.have_debug_overlay) {
-        const state: *types.SwaylockState = surface.state.?;
+        const state: *types.SwaylockState = surface.g.?;
         if (surface.width == 0 or surface.height == 0) return;
 
         var count: i32 = 0;
@@ -169,7 +168,7 @@ fn render_debug_overlay(surface: *types.SwaylockSurface) void {
 }
 
 pub fn render(surface: *types.SwaylockSurface) void {
-    const state: *types.SwaylockState = surface.state.?;
+    const state: *types.SwaylockState = surface.g.?;
     const bw: i32 =
         @as(i32, @intCast(surface.width)) * surface.scale;
     const bh: i32 =
@@ -191,9 +190,11 @@ pub fn render(surface: *types.SwaylockSurface) void {
             bh,
             wl.WL_SHM_FORMAT_ARGB8888,
         ) == null) {
-            log.swayLog(
-                log_err,
+            log.slog(
+                log.LogImportance.err,
+                @src(),
                 "Failed to create new buffer for frame background.",
+                .{},
             );
             return;
         }
@@ -279,7 +280,7 @@ fn configure_font_drawing(
 }
 
 fn render_frame(surface: *types.SwaylockSurface) bool {
-    const state: *types.SwaylockState = surface.state.?;
+    const state: *types.SwaylockState = surface.g.?;
     const scale: i32 = surface.scale;
     const arc_radius: i32 =
         @as(i32, @intCast(state.args.radius)) * scale;
@@ -374,7 +375,7 @@ fn render_frame(surface: *types.SwaylockSurface) bool {
             @intCast(buf_h),
         );
         if (buf_ptr == null) {
-            log.swayLog(log_err, "No buffer");
+            log.slog(log.LogImportance.err, @src(), "No buffer", .{});
             return false;
         }
         const buf: *types.PoolBuffer = buf_ptr.?;
@@ -784,7 +785,7 @@ fn render_frame(surface: *types.SwaylockSurface) bool {
         @intCast(buffer_height),
     );
     if (buf_ptr == null) {
-        log.swayLog(log_err, "No buffer");
+        log.slog(log.LogImportance.err, @src(), "No buffer", .{});
         return false;
     }
     const buf: *types.PoolBuffer = buf_ptr.?;

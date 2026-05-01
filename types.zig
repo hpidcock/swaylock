@@ -11,14 +11,16 @@ const std = @import("std");
 /// External C library bindings re-exported for every module.
 /// Covers Cairo, Wayland client, xkbcommon, and the generated
 /// ext-session-lock protocol header.
-/// poll.h and time.h supply the struct_pollfd / struct_timespec
-/// layouts used by Loop and LoopTimer; replace with std.posix
-/// equivalents once all field-name references (tv_sec, tv_nsec)
-/// have been updated.
+/// poll.h and time.h are retained for callers that still use
+/// the raw C constants (POLLIN, CLOCK_MONOTONIC, etc.); the
+/// Loop/LoopTimer types now use std.posix equivalents directly.
 pub const c = @cImport({
     @cDefine("_POSIX_C_SOURCE", "200809L");
     @cInclude("errno.h");
     @cInclude("poll.h");
+    @cInclude("string.h");
+    @cInclude("stdlib.h");
+    @cInclude("wordexp.h");
     @cInclude("time.h");
     @cInclude("cairo/cairo.h");
     @cInclude("wayland-client.h");
@@ -59,17 +61,6 @@ pub const CommMsg = struct {
     pub const auth_event: u8 = 0x86;
 };
 
-// ── Log importance ────────────────────────────────────────────────
-
-/// Log verbosity levels; mirrors enum log_importance in log.h.
-pub const LogImportance = enum(c_int) {
-    silent = 0,
-    err = 1,
-    info = 2,
-    debug = 3,
-    last = 4,
-};
-
 // ── Event loop ────────────────────────────────────────────────────
 
 /// Callback fired when a registered fd becomes ready.
@@ -95,7 +86,7 @@ pub const FdEvent = struct {
 pub const LoopTimer = struct {
     callback: TimerCallback,
     data: ?*anyopaque,
-    expiry: c.struct_timespec,
+    expiry: std.posix.timespec,
     removed: bool,
     link: c.wl_list,
 };
@@ -103,7 +94,7 @@ pub const LoopTimer = struct {
 /// Poll-based event loop.  Owns a dynamically-sized pollfd array and
 /// two intrusive wl_lists: one for fd events and one for timers.
 pub const Loop = struct {
-    fds: [*]c.struct_pollfd,
+    fds: [*]std.posix.pollfd,
     fd_length: i32,
     fd_capacity: i32,
     fd_events: c.wl_list,
@@ -137,7 +128,7 @@ pub const SwaylockXkb = struct {
 
 /// Wayland seat: pointer, keyboard, and key-repeat parameters.
 pub const SwaylockSeat = struct {
-    state: ?*SwaylockState,
+    g: ?*SwaylockState,
     pointer: ?*c.wl_pointer,
     keyboard: ?*c.wl_keyboard,
     repeat_period_ms: i32,
@@ -277,8 +268,8 @@ pub const SwaylockState = struct {
     shm: ?*c.wl_shm,
     /// Head of the intrusive wl_list of SwaylockSurface.link nodes.
     surfaces: c.wl_list,
-    /// Head of the intrusive wl_list of SwaylockImage.link nodes.
-    images: c.wl_list,
+    /// Loaded background images, one per -i argument.
+    images: std.ArrayListUnmanaged(*SwaylockImage),
     args: SwaylockArgs,
     password: SwaylockPassword,
     xkb: SwaylockXkb,
@@ -314,7 +305,7 @@ pub const SwaylockState = struct {
 /// Per-output lock surface.
 pub const SwaylockSurface = struct {
     image: ?*c.cairo_surface_t,
-    state: ?*SwaylockState,
+    g: ?*SwaylockState,
     output: ?*c.wl_output,
     output_global_name: u32,
     /// Background Wayland surface.
@@ -350,6 +341,6 @@ pub const SwaylockImage = struct {
     path: ?[*:0]u8,
     output_name: ?[*:0]u8,
     cairo_surface: ?*c.cairo_surface_t,
-    /// Intrusive wl_list node linked into SwaylockState.images.
-    link: c.wl_list,
 };
+
+pub const LineMode = enum { line, inside, ring };

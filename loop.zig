@@ -1,22 +1,10 @@
-//! loop.zig – Zig port of loop.c.
-//! A simple poll(2)-based event loop for Wayland clients.
+//! loop.zig – poll(2)-based event loop for Wayland clients.
 
 const std = @import("std");
 const types = @import("types.zig");
-
-// All wayland/poll/time/errno types come from types.c.
-// Only string.h is needed locally for strerror.
-const c = @cImport({
-    @cDefine("_POSIX_C_SOURCE", "200809L");
-    @cInclude("string.h");
-});
+const log = @import("log.zig");
 
 const wl = types.c;
-
-// Log verbosity shorthands.
-const log_err: i32 = @intFromEnum(types.LogImportance.err);
-
-const log = @import("log.zig");
 
 const alloc = std.heap.c_allocator;
 
@@ -37,12 +25,12 @@ inline fn wlEntry(
 /// Creates a new event loop.
 pub fn loopCreate() ?*types.Loop {
     const loop = alloc.create(types.Loop) catch {
-        log.slog(log_err, @src(), "Unable to allocate memory for loop", .{});
+        log.slog(log.LogImportance.err, @src(), "Unable to allocate memory for loop", .{});
         return null;
     };
-    const fds = alloc.alloc(wl.struct_pollfd, 10) catch {
+    const fds = alloc.alloc(std.posix.pollfd, 10) catch {
         alloc.destroy(loop);
-        log.slog(log_err, @src(), "Unable to allocate memory for loop", .{});
+        log.slog(log.LogImportance.err, @src(), "Unable to allocate memory for loop", .{});
         return null;
     };
     loop.* = .{
@@ -84,15 +72,15 @@ pub fn loopDestroy(loop: *types.Loop) void {
 pub fn loopPoll(loop: *types.Loop) void {
     var ms: i32 = std.math.maxInt(i32);
     if (wl.wl_list_empty(&loop.timers) == 0) {
-        var now: wl.struct_timespec = undefined;
-        _ = wl.clock_gettime(wl.CLOCK_MONOTONIC, &now);
+        const now = std.posix.clock_gettime(.MONOTONIC) catch
+            std.posix.timespec{ .sec = 0, .nsec = 0 };
         var tnode = wlPtr(loop.timers.next);
         while (tnode != &loop.timers) {
             const timer = wlEntry(types.LoopTimer, "link", tnode);
             const sec_diff: i64 =
-                @as(i64, timer.expiry.tv_sec) - @as(i64, now.tv_sec);
+                @as(i64, timer.expiry.sec) - @as(i64, now.sec);
             const nsec_diff: i64 =
-                @as(i64, timer.expiry.tv_nsec) - @as(i64, now.tv_nsec);
+                @as(i64, timer.expiry.nsec) - @as(i64, now.nsec);
             const full: i64 =
                 sec_diff * 1000 + @divTrunc(nsec_diff, 1_000_000);
             const timer_ms: i32 = @intCast(
@@ -104,20 +92,16 @@ pub fn loopPoll(loop: *types.Loop) void {
     }
     if (ms < 0) ms = 0;
 
-    const ret = wl.poll(
-        @ptrCast(loop.fds),
-        @as(wl.nfds_t, @intCast(loop.fd_length)),
-        ms,
-    );
-    if (ret < 0 and wl.__errno_location().* != wl.EINTR) {
+    const fds = loop.fds[0..@intCast(loop.fd_length)];
+    _ = std.posix.poll(fds, ms) catch |err| {
         log.slog(
-            log_err,
+            log.LogImportance.err,
             @src(),
             "poll failed: {s}",
-            .{c.strerror(wl.__errno_location().*)},
+            .{@errorName(err)},
         );
-        std.c.exit(1);
-    }
+        std.process.exit(1);
+    };
 
     // Dispatch fd events.
     var fd_index: usize = 0;
@@ -126,7 +110,7 @@ pub fn loopPoll(loop: *types.Loop) void {
         const event = wlEntry(types.FdEvent, "link", fnode);
         const pfd = loop.fds[fd_index];
         const events: i16 =
-            pfd.events | @as(i16, wl.POLLHUP | wl.POLLERR);
+            pfd.events | (std.posix.POLL.HUP | std.posix.POLL.ERR);
         if (pfd.revents & events != 0)
             event.callback(pfd.fd, pfd.revents, event.data);
         fd_index += 1;
@@ -135,8 +119,8 @@ pub fn loopPoll(loop: *types.Loop) void {
 
     // Dispatch expired timers.
     if (wl.wl_list_empty(&loop.timers) == 0) {
-        var now: wl.struct_timespec = undefined;
-        _ = wl.clock_gettime(wl.CLOCK_MONOTONIC, &now);
+        const now = std.posix.clock_gettime(.MONOTONIC) catch
+            std.posix.timespec{ .sec = 0, .nsec = 0 };
         var tnode = wlPtr(loop.timers.next);
         while (tnode != &loop.timers) {
             const tnext = wlPtr(tnode.next);
@@ -148,9 +132,9 @@ pub fn loopPoll(loop: *types.Loop) void {
                 continue;
             }
             const expired =
-                timer.expiry.tv_sec < now.tv_sec or
-                (timer.expiry.tv_sec == now.tv_sec and
-                    timer.expiry.tv_nsec < now.tv_nsec);
+                timer.expiry.sec < now.sec or
+                (timer.expiry.sec == now.sec and
+                    timer.expiry.nsec < now.nsec);
             if (expired) {
                 timer.callback(timer.data);
                 wl.wl_list_remove(&timer.link);
@@ -170,7 +154,7 @@ pub fn loopAddFd(
     data: ?*anyopaque,
 ) void {
     const event = alloc.create(types.FdEvent) catch {
-        log.slog(log_err, @src(), "Unable to allocate memory for event", .{});
+        log.slog(log.LogImportance.err, @src(), "Unable to allocate memory for event", .{});
         return;
     };
     event.* = .{
@@ -187,7 +171,7 @@ pub fn loopAddFd(
             loop.fds[0..old_cap],
             new_cap,
         ) catch {
-            log.slog(log_err, @src(), "Unable to reallocate fd array", .{});
+            log.slog(log.LogImportance.err, @src(), "Unable to reallocate fd array", .{});
             return;
         };
         loop.fds = new_fds.ptr;
@@ -210,24 +194,25 @@ pub fn loopAddTimer(
     data: ?*anyopaque,
 ) ?*types.LoopTimer {
     const timer = alloc.create(types.LoopTimer) catch {
-        log.slog(log_err, @src(), "Unable to allocate memory for timer", .{});
+        log.slog(log.LogImportance.err, @src(), "Unable to allocate memory for timer", .{});
         return null;
     };
+    var expiry = std.posix.clock_gettime(.MONOTONIC) catch
+        std.posix.timespec{ .sec = 0, .nsec = 0 };
+    expiry.sec += @intCast(@divTrunc(ms, 1000));
+    var nsec: isize = @as(isize, @rem(ms, 1000)) * 1_000_000;
+    if (expiry.nsec + nsec >= 1_000_000_000) {
+        expiry.sec += 1;
+        nsec -= 1_000_000_000;
+    }
+    expiry.nsec += nsec;
     timer.* = .{
         .callback = callback,
         .data = data,
-        .expiry = undefined,
+        .expiry = expiry,
         .removed = false,
         .link = undefined,
     };
-    _ = wl.clock_gettime(wl.CLOCK_MONOTONIC, &timer.expiry);
-    timer.expiry.tv_sec += @intCast(@divTrunc(ms, 1000));
-    var nsec: i64 = @as(i64, @rem(ms, 1000)) * 1_000_000;
-    if (@as(i64, timer.expiry.tv_nsec) + nsec >= 1_000_000_000) {
-        timer.expiry.tv_sec += 1;
-        nsec -= 1_000_000_000;
-    }
-    timer.expiry.tv_nsec += @intCast(nsec);
     wl.wl_list_insert(&loop.timers, &timer.link);
     return timer;
 }
@@ -249,7 +234,7 @@ pub fn loopRemoveFd(
             loop.fd_length -= 1;
             const len: usize = @intCast(loop.fd_length);
             std.mem.copyForwards(
-                wl.struct_pollfd,
+                std.posix.pollfd,
                 loop.fds[fd_index..len],
                 loop.fds[fd_index + 1 .. len + 1],
             );

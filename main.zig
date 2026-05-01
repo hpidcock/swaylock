@@ -1,8 +1,11 @@
 //! main.zig – Zig port of main.c.
-//! All JSON parsing uses std.json in place of cJSON.
 
 const std = @import("std");
 const opts = @import("main_options");
+const clap = @import("clap");
+
+const params = @import("params.zig");
+const state = @import("state.zig");
 
 const c = @cImport({
     @cDefine("_POSIX_C_SOURCE", "200809L");
@@ -10,7 +13,7 @@ const c = @cImport({
     if (opts.have_debug_overlay) @cDefine("HAVE_DEBUG_OVERLAY", "1");
     @cInclude("errno.h");
     @cInclude("fcntl.h");
-    @cInclude("getopt.h");
+
     @cInclude("signal.h");
     @cInclude("stdio.h");
     @cInclude("stdlib.h");
@@ -22,9 +25,6 @@ const c = @cImport({
 
 const types = @import("types.zig");
 const wl = types.c;
-const log_err: i32 = @intFromEnum(types.LogImportance.err);
-const log_info: i32 = @intFromEnum(types.LogImportance.info);
-const log_debug: i32 = @intFromEnum(types.LogImportance.debug);
 
 const log = @import("log.zig");
 const background_image = @import("background-image.zig");
@@ -32,21 +32,15 @@ const background_image = @import("background-image.zig");
 const loop = @import("loop.zig");
 const comm = @import("comm.zig");
 const pool_buffer = @import("pool-buffer.zig");
-const render_mod = @import("render.zig");
-const seat_mod = @import("seat.zig");
+const render = @import("render.zig");
+const seat = @import("seat.zig");
 const password_mod = @import("password.zig");
 const password_buffer = @import("password_buffer.zig");
 
 const pam_mod = @import("pam.zig");
 
-// getopt globals not always exposed by @cImport.
-extern var optarg: [*c]u8;
-extern var optind: c_int;
-
 var sigusr_fds: [2]i32 = .{ -1, -1 };
-var state: types.SwaylockState = std.mem.zeroes(types.SwaylockState);
-
-const LineMode = enum { line, inside, ring };
+var g: types.SwaylockState = std.mem.zeroes(types.SwaylockState);
 
 /// Return the struct enclosing a wl_list node pointer.
 /// Accepts any pointer type to avoid cImport-namespace mismatches.
@@ -65,24 +59,6 @@ fn dupStr(s: []const u8) ?[*:0]u8 {
     return result.ptr;
 }
 
-fn parseColor(color_in: [*c]const u8) u32 {
-    var color = color_in;
-    if (color[0] == '#') color += 1;
-    const len = c.strlen(color);
-    if (len != 6 and len != 8) {
-        log.slog(
-            log_debug,
-            @src(),
-            "Invalid color {s}, defaulting to 0xFFFFFFFF",
-            .{color},
-        );
-        return 0xFFFFFFFF;
-    }
-    var res: u32 = @truncate(c.strtoul(color, null, 16));
-    if (len == 6) res = (res << 8) | 0xFF;
-    return res;
-}
-
 fn lenientStrcmp(a: ?[*:0]const u8, b: ?[*:0]const u8) i32 {
     if (a == b) return 0;
     if (a == null) return -1;
@@ -93,7 +69,7 @@ fn lenientStrcmp(a: ?[*:0]const u8, b: ?[*:0]const u8) i32 {
 fn daemonize() void {
     var fds: [2]i32 = undefined;
     if (c.pipe(&fds) != 0) {
-        log.slog(log_err, @src(), "Failed to pipe", .{});
+        log.slog(log.LogImportance.err, @src(), "Failed to pipe", .{});
         c.exit(1);
     }
     if (c.fork() == 0) {
@@ -115,7 +91,7 @@ fn daemonize() void {
         _ = c.close(fds[1]);
         var success: u8 = undefined;
         if (c.read(fds[0], &success, 1) != 1 or success == 0) {
-            log.slog(log_err, @src(), "Failed to daemonize", .{});
+            log.slog(log.LogImportance.err, @src(), "Failed to daemonize", .{});
             c.exit(1);
         }
         _ = c.close(fds[0]);
@@ -157,11 +133,11 @@ fn surfaceIsOpaque(surface: *types.SwaylockSurface) bool {
         return types.c.cairo_surface_get_content(surface.image) ==
             types.c.CAIRO_CONTENT_COLOR;
     }
-    return (surface.state.?.args.colors.background & 0xff) == 0xff;
+    return (surface.g.?.args.colors.background & 0xff) == 0xff;
 }
 
 fn createSurface(surface: *types.SwaylockSurface) void {
-    const st = surface.state.?;
+    const st = surface.g.?;
     surface.image = selectImage(st, surface);
     surface.surface =
         wl.wl_compositor_create_surface(st.compositor);
@@ -234,24 +210,12 @@ fn extSessionLockSurfaceV1HandleConfigure(
         serial,
     );
     surface.dirty = true;
-    render_mod.render(surface);
+    render.render(surface);
 }
 
 const ext_session_lock_surface_v1_listener: wl.struct_ext_session_lock_surface_v1_listener = .{
     .configure = @ptrCast(&extSessionLockSurfaceV1HandleConfigure),
 };
-
-export fn damage_state(st: *types.SwaylockState) void {
-    const head = &st.surfaces;
-    var node = head.next;
-    while (node != head) {
-        const surface =
-            wlEntry(types.SwaylockSurface, "link", node.?);
-        node = surface.link.next;
-        surface.dirty = true;
-        render_mod.render(surface);
-    }
-}
 
 fn handleWlOutputGeometry(
     data: ?*anyopaque,
@@ -276,9 +240,9 @@ fn handleWlOutputGeometry(
     const surface: *types.SwaylockSurface =
         @ptrCast(@alignCast(data.?));
     surface.subpixel = @intCast(subpixel);
-    if (surface.state.?.run_display) {
+    if (surface.g.?.run_display) {
         surface.dirty = true;
-        render_mod.render(surface);
+        render.render(surface);
     }
 }
 
@@ -305,7 +269,7 @@ fn handleWlOutputDone(
     _ = output;
     const surface: *types.SwaylockSurface =
         @ptrCast(@alignCast(data.?));
-    if (!surface.created and surface.state.?.run_display)
+    if (!surface.created and surface.g.?.run_display)
         createSurface(surface);
 }
 
@@ -318,9 +282,9 @@ fn handleWlOutputScale(
     const surface: *types.SwaylockSurface =
         @ptrCast(@alignCast(data.?));
     surface.scale = factor;
-    if (surface.state.?.run_display) {
+    if (surface.g.?.run_display) {
         surface.dirty = true;
-        render_mod.render(surface);
+        render.render(surface);
     }
 }
 
@@ -376,7 +340,7 @@ fn extSessionLockV1HandleFinished(
         return;
     }
     log.slog(
-        log_err,
+        log.LogImportance.err,
         @src(),
         "Failed to lock session -- is another lockscreen running?",
         .{},
@@ -424,7 +388,7 @@ fn handleGlobal(
             1,
         ));
     } else if (c.strcmp(interface, wl.wl_seat_interface.name) == 0) {
-        const seat: ?*wl.wl_seat = @ptrCast(wl.wl_registry_bind(
+        const se: ?*wl.wl_seat = @ptrCast(wl.wl_registry_bind(
             registry,
             name,
             &wl.wl_seat_interface,
@@ -434,10 +398,10 @@ fn handleGlobal(
             types.SwaylockSeat,
         ) catch @panic("OOM");
         swaylock_seat.* = std.mem.zeroes(types.SwaylockSeat);
-        swaylock_seat.state = st;
+        swaylock_seat.g = st;
         _ = wl.wl_seat_add_listener(
-            seat,
-            &seat_mod.seatListener,
+            se,
+            &seat.seatListener,
             swaylock_seat,
         );
     } else if (c.strcmp(
@@ -448,7 +412,7 @@ fn handleGlobal(
             types.SwaylockSurface,
         ) catch @panic("OOM");
         surface.* = std.mem.zeroes(types.SwaylockSurface);
-        surface.state = st;
+        surface.g = st;
         surface.output = @ptrCast(wl.wl_registry_bind(
             registry,
             name,
@@ -510,13 +474,13 @@ fn doSigusr(
 }
 
 fn debugUnlockOnExit() callconv(std.builtin.CallingConvention.c) void {
-    if (state.ext_session_lock_v1 != null) {
+    if (g.ext_session_lock_v1 != null) {
         wl.ext_session_lock_v1_unlock_and_destroy(
-            state.ext_session_lock_v1,
+            g.ext_session_lock_v1,
         );
-        state.ext_session_lock_v1 = null;
-        if (state.display != null)
-            _ = wl.wl_display_flush(state.display);
+        g.ext_session_lock_v1 = null;
+        if (g.display != null)
+            _ = wl.wl_display_flush(g.display);
     }
 }
 
@@ -532,11 +496,7 @@ fn selectImage(
     surface: *types.SwaylockSurface,
 ) ?*types.c.cairo_surface_t {
     var default_image: ?*types.c.cairo_surface_t = null;
-    const head = &st.images;
-    var node = head.next;
-    while (node != head) {
-        const image = wlEntry(types.SwaylockImage, "link", node.?);
-        node = image.link.next;
+    for (st.images.items) |image| {
         if (lenientStrcmp(
             image.output_name,
             surface.output_name,
@@ -547,115 +507,6 @@ fn selectImage(
         }
     }
     return default_image;
-}
-
-fn joinArgs(argv: [*c][*c]u8, argc: i32) [*c]u8 {
-    std.debug.assert(argc > 0);
-    var len: usize = 0;
-    var i: usize = 0;
-    while (i < @as(usize, @intCast(argc))) : (i += 1)
-        len += c.strlen(argv[i]) + 1;
-    const res: [*c]u8 = @ptrCast(c.malloc(len));
-    if (res == null) return null;
-    var offset: usize = 0;
-    i = 0;
-    while (i < @as(usize, @intCast(argc))) : (i += 1) {
-        const s = argv[i];
-        const slen = c.strlen(s);
-        _ = c.strcpy(res + offset, s);
-        offset += slen;
-        res[offset] = ' ';
-        offset += 1;
-    }
-    res[offset - 1] = 0;
-    return res;
-}
-
-fn loadImage(arg: [*c]u8, st: *types.SwaylockState) void {
-    const image = std.heap.c_allocator.create(
-        types.SwaylockImage,
-    ) catch @panic("OOM");
-    image.* = std.mem.zeroes(types.SwaylockImage);
-    const separator: [*c]u8 = c.strchr(arg, ':');
-    if (separator != null) {
-        separator[0] = 0;
-        image.output_name = if (separator == arg)
-            null
-        else
-            @ptrCast(c.strdup(arg));
-        image.path = @ptrCast(c.strdup(separator + 1));
-    } else {
-        image.output_name = null;
-        image.path = @ptrCast(c.strdup(arg));
-    }
-    // Replace any existing image for the same output.
-    const head = &st.images;
-    var node = head.next;
-    while (node != head) {
-        const iter_image =
-            wlEntry(types.SwaylockImage, "link", node.?);
-        node = iter_image.link.next;
-        if (lenientStrcmp(
-            iter_image.output_name,
-            image.output_name,
-        ) == 0) {
-            if (image.output_name != null) {
-                log.slog(
-                    log_debug,
-                    @src(),
-                    "Replacing image defined for output {s} with {s}",
-                    .{
-                        if (image.output_name) |n| @as([*:0]const u8, n) else "(null)",
-                        if (image.path) |p| @as([*:0]const u8, p) else "(null)",
-                    },
-                );
-            } else {
-                log.slog(
-                    log_debug,
-                    @src(),
-                    "Replacing default image with {s}",
-                    .{if (image.path) |p| @as([*:0]const u8, p) else "(null)"},
-                );
-            }
-            wl.wl_list_remove(&iter_image.link);
-            c.free(iter_image.cairo_surface);
-            c.free(@ptrCast(iter_image.output_name));
-            c.free(@ptrCast(iter_image.path));
-            std.heap.c_allocator.destroy(iter_image);
-            break;
-        }
-    }
-    // Escape double spaces so wordexp handles the path correctly.
-    while (c.strstr(@ptrCast(image.path), "  ") != null) {
-        const old_len = c.strlen(@ptrCast(image.path));
-        image.path = @ptrCast(c.realloc(@ptrCast(image.path), old_len + 2));
-        const ptr: [*c]u8 = c.strstr(@ptrCast(image.path), "  ") + 1;
-        _ = c.memmove(ptr + 1, ptr, c.strlen(ptr) + 1);
-        ptr[0] = '\\';
-    }
-    var p: c.wordexp_t = undefined;
-    if (c.wordexp(@ptrCast(image.path), &p, 0) == 0) {
-        c.free(@ptrCast(image.path));
-        image.path = @ptrCast(joinArgs(p.we_wordv, @intCast(p.we_wordc)));
-        c.wordfree(&p);
-    }
-    image.cairo_surface = background_image.loadBackgroundImage(
-        std.mem.span(image.path.?),
-    );
-    if (image.cairo_surface == null) {
-        std.heap.c_allocator.destroy(image);
-        return;
-    }
-    wl.wl_list_insert(&st.images, &image.link);
-    log.slog(
-        log_debug,
-        @src(),
-        "Loaded image {s} for output {s}",
-        .{
-            if (image.path) |img_path| @as([*:0]const u8, img_path) else "(null)",
-            if (image.output_name) |n| @as([*:0]const u8, n) else "*",
-        },
-    );
 }
 
 fn setDefaultColors(colors: *types.SwaylockColors) void {
@@ -698,570 +549,95 @@ fn setDefaultColors(colors: *types.SwaylockColors) void {
     };
 }
 
-// Long option codes starting above the ASCII range.
-const lo_bs_hl_color: i32 = 256;
-const lo_caps_lock_bs_hl_color: i32 = 257;
-const lo_caps_lock_key_hl_color: i32 = 258;
-const lo_font: i32 = 259;
-const lo_font_size: i32 = 260;
-const lo_ind_idle_visible: i32 = 261;
-const lo_ind_radius: i32 = 262;
-const lo_ind_x_position: i32 = 263;
-const lo_ind_y_position: i32 = 264;
-const lo_ind_thickness: i32 = 265;
-const lo_inside_color: i32 = 266;
-const lo_inside_clear_color: i32 = 267;
-const lo_inside_caps_lock_color: i32 = 268;
-const lo_inside_ver_color: i32 = 269;
-const lo_inside_wrong_color: i32 = 270;
-const lo_key_hl_color: i32 = 271;
-const lo_layout_txt_color: i32 = 272;
-const lo_layout_bg_color: i32 = 273;
-const lo_layout_border_color: i32 = 274;
-const lo_line_color: i32 = 275;
-const lo_line_clear_color: i32 = 276;
-const lo_line_caps_lock_color: i32 = 277;
-const lo_line_ver_color: i32 = 278;
-const lo_line_wrong_color: i32 = 279;
-const lo_ring_color: i32 = 280;
-const lo_ring_clear_color: i32 = 281;
-const lo_ring_caps_lock_color: i32 = 282;
-const lo_ring_ver_color: i32 = 283;
-const lo_ring_wrong_color: i32 = 284;
-const lo_sep_color: i32 = 285;
-const lo_text_color: i32 = 286;
-const lo_text_clear_color: i32 = 287;
-const lo_text_caps_lock_color: i32 = 288;
-const lo_text_ver_color: i32 = 289;
-const lo_text_wrong_color: i32 = 290;
-const lo_steal_unlock: i32 = 291;
-
-const usage =
-    "Usage: swaylock [options...]\n" ++
-    "\n" ++
-    "  -C, --config <config_file>       " ++
-    "Path to the config file.\n" ++
-    "  -c, --color <color>              " ++
-    "Turn the screen into the given color instead of light gray.\n" ++
-    "  -d, --debug                      " ++
-    "Enable debugging output.\n" ++
-    "  -e, --ignore-empty-password      " ++
-    "When an empty password is provided, do not validate it.\n" ++
-    "  -F, --show-failed-attempts       " ++
-    "Show current count of failed authentication attempts.\n" ++
-    "  -f, --daemonize                  " ++
-    "Detach from the controlling terminal after locking.\n" ++
-    "  -R, --ready-fd <fd>              " ++
-    "File descriptor to send readiness notifications to.\n" ++
-    "  -h, --help                       " ++
-    "Show help message and quit.\n" ++
-    "  -i, --image [[<output>]:]<path>  " ++
-    "Display the given image, optionally only on the given output.\n" ++
-    "  -k, --show-keyboard-layout       " ++
-    "Display the current xkb layout while typing.\n" ++
-    "  -K, --hide-keyboard-layout       " ++
-    "Hide the current xkb layout while typing.\n" ++
-    "  -L, --disable-caps-lock-text     " ++
-    "Disable the Caps Lock text.\n" ++
-    "  -l, --indicator-caps-lock        " ++
-    "Show the current Caps Lock state also on the indicator.\n" ++
-    "  -s, --scaling <mode>             " ++
-    "Image scaling mode: stretch, fill, fit, center, tile, solid_color.\n" ++
-    "  -t, --tiling                     " ++
-    "Same as --scaling=tile.\n" ++
-    "  -u, --no-unlock-indicator        " ++
-    "Disable the unlock indicator.\n" ++
-    "  -v, --version                    " ++
-    "Show the version number and quit.\n" ++
-    "  --steal-unlock                   " ++
-    "Attempt to unlock a session left locked by a crashed\n" ++
-    "                               " ++
-    "swaylock instance, then exit.\n" ++
-    "  --bs-hl-color <color>            " ++
-    "Sets the color of backspace highlight segments.\n" ++
-    "  --caps-lock-bs-hl-color <color>  " ++
-    "Sets the color of backspace highlight segments when Caps Lock " ++
-    "is active.\n" ++
-    "  --caps-lock-key-hl-color <color> " ++
-    "Sets the color of the key press highlight segments when " ++
-    "Caps Lock is active.\n" ++
-    "  --font <font>                    " ++
-    "Sets the font of the text.\n" ++
-    "  --font-size <size>               " ++
-    "Sets a fixed font size for the indicator text.\n" ++
-    "  --indicator-idle-visible         " ++
-    "Sets the indicator to show even if idle.\n" ++
-    "  --indicator-radius <radius>      " ++
-    "Sets the indicator radius.\n" ++
-    "  --indicator-thickness <thick>    " ++
-    "Sets the indicator thickness.\n" ++
-    "  --indicator-x-position <x>       " ++
-    "Sets the horizontal position of the indicator.\n" ++
-    "  --indicator-y-position <y>       " ++
-    "Sets the vertical position of the indicator.\n" ++
-    "  --inside-color <color>           " ++
-    "Sets the color of the inside of the indicator.\n" ++
-    "  --inside-clear-color <color>     " ++
-    "Sets the color of the inside of the indicator when cleared.\n" ++
-    "  --inside-caps-lock-color <color> " ++
-    "Sets the color of the inside of the indicator when Caps Lock " ++
-    "is active.\n" ++
-    "  --inside-ver-color <color>       " ++
-    "Sets the color of the inside of the indicator when verifying.\n" ++
-    "  --inside-wrong-color <color>     " ++
-    "Sets the color of the inside of the indicator when invalid.\n" ++
-    "  --key-hl-color <color>           " ++
-    "Sets the color of the key press highlight segments.\n" ++
-    "  --layout-bg-color <color>        " ++
-    "Sets the background color of the box containing the layout text.\n" ++
-    "  --layout-border-color <color>    " ++
-    "Sets the color of the border of the box containing the layout text.\n" ++
-    "  --layout-text-color <color>      " ++
-    "Sets the color of the layout text.\n" ++
-    "  --line-color <color>             " ++
-    "Sets the color of the line between the inside and ring.\n" ++
-    "  --line-clear-color <color>       " ++
-    "Sets the color of the line between the inside and ring when " ++
-    "cleared.\n" ++
-    "  --line-caps-lock-color <color>   " ++
-    "Sets the color of the line between the inside and ring when " ++
-    "Caps Lock is active.\n" ++
-    "  --line-ver-color <color>         " ++
-    "Sets the color of the line between the inside and ring when " ++
-    "verifying.\n" ++
-    "  --line-wrong-color <color>       " ++
-    "Sets the color of the line between the inside and ring when " ++
-    "invalid.\n" ++
-    "  -n, --line-uses-inside           " ++
-    "Use the inside color for the line between the inside and ring.\n" ++
-    "  -r, --line-uses-ring             " ++
-    "Use the ring color for the line between the inside and ring.\n" ++
-    "  --ring-color <color>             " ++
-    "Sets the color of the ring of the indicator.\n" ++
-    "  --ring-clear-color <color>       " ++
-    "Sets the color of the ring of the indicator when cleared.\n" ++
-    "  --ring-caps-lock-color <color>   " ++
-    "Sets the color of the ring of the indicator when Caps Lock " ++
-    "is active.\n" ++
-    "  --ring-ver-color <color>         " ++
-    "Sets the color of the ring of the indicator when verifying.\n" ++
-    "  --ring-wrong-color <color>       " ++
-    "Sets the color of the ring of the indicator when invalid.\n" ++
-    "  --separator-color <color>        " ++
-    "Sets the color of the lines that separate highlight segments.\n" ++
-    "  --text-color <color>             " ++
-    "Sets the color of the text.\n" ++
-    "  --text-clear-color <color>       " ++
-    "Sets the color of the text when cleared.\n" ++
-    "  --text-caps-lock-color <color>   " ++
-    "Sets the color of the text when Caps Lock is active.\n" ++
-    "  --text-ver-color <color>         " ++
-    "Sets the color of the text when verifying.\n" ++
-    "  --text-wrong-color <color>       " ++
-    "Sets the color of the text when invalid.\n" ++
-    "\n" ++
-    "All <color> options are of the form <rrggbb[aa]>.\n";
-
-fn parseOptions(
-    argc: c_int,
-    argv: [*c][*c]u8,
-    st: ?*types.SwaylockState,
-    line_mode: ?*LineMode,
-    config_path: ?*[*c]u8,
-) c_int {
-    const long_options = [_]c.struct_option{
-        .{ .name = "config", .has_arg = c.required_argument, .flag = null, .val = 'C' },
-        .{ .name = "color", .has_arg = c.required_argument, .flag = null, .val = 'c' },
-        .{ .name = "debug", .has_arg = c.no_argument, .flag = null, .val = 'd' },
-        .{ .name = "ignore-empty-password", .has_arg = c.no_argument, .flag = null, .val = 'e' },
-        .{ .name = "daemonize", .has_arg = c.no_argument, .flag = null, .val = 'f' },
-        .{ .name = "ready-fd", .has_arg = c.required_argument, .flag = null, .val = 'R' },
-        .{ .name = "help", .has_arg = c.no_argument, .flag = null, .val = 'h' },
-        .{ .name = "image", .has_arg = c.required_argument, .flag = null, .val = 'i' },
-        .{ .name = "disable-caps-lock-text", .has_arg = c.no_argument, .flag = null, .val = 'L' },
-        .{ .name = "indicator-caps-lock", .has_arg = c.no_argument, .flag = null, .val = 'l' },
-        .{ .name = "line-uses-inside", .has_arg = c.no_argument, .flag = null, .val = 'n' },
-        .{ .name = "line-uses-ring", .has_arg = c.no_argument, .flag = null, .val = 'r' },
-        .{ .name = "scaling", .has_arg = c.required_argument, .flag = null, .val = 's' },
-        .{ .name = "tiling", .has_arg = c.no_argument, .flag = null, .val = 't' },
-        .{ .name = "no-unlock-indicator", .has_arg = c.no_argument, .flag = null, .val = 'u' },
-        .{ .name = "show-keyboard-layout", .has_arg = c.no_argument, .flag = null, .val = 'k' },
-        .{ .name = "hide-keyboard-layout", .has_arg = c.no_argument, .flag = null, .val = 'K' },
-        .{ .name = "show-failed-attempts", .has_arg = c.no_argument, .flag = null, .val = 'F' },
-        .{ .name = "version", .has_arg = c.no_argument, .flag = null, .val = 'v' },
-        .{ .name = "bs-hl-color", .has_arg = c.required_argument, .flag = null, .val = lo_bs_hl_color },
-        .{ .name = "caps-lock-bs-hl-color", .has_arg = c.required_argument, .flag = null, .val = lo_caps_lock_bs_hl_color },
-        .{ .name = "caps-lock-key-hl-color", .has_arg = c.required_argument, .flag = null, .val = lo_caps_lock_key_hl_color },
-        .{ .name = "font", .has_arg = c.required_argument, .flag = null, .val = lo_font },
-        .{ .name = "font-size", .has_arg = c.required_argument, .flag = null, .val = lo_font_size },
-        .{ .name = "indicator-idle-visible", .has_arg = c.no_argument, .flag = null, .val = lo_ind_idle_visible },
-        .{ .name = "indicator-radius", .has_arg = c.required_argument, .flag = null, .val = lo_ind_radius },
-        .{ .name = "indicator-thickness", .has_arg = c.required_argument, .flag = null, .val = lo_ind_thickness },
-        .{ .name = "indicator-x-position", .has_arg = c.required_argument, .flag = null, .val = lo_ind_x_position },
-        .{ .name = "indicator-y-position", .has_arg = c.required_argument, .flag = null, .val = lo_ind_y_position },
-        .{ .name = "inside-color", .has_arg = c.required_argument, .flag = null, .val = lo_inside_color },
-        .{ .name = "inside-clear-color", .has_arg = c.required_argument, .flag = null, .val = lo_inside_clear_color },
-        .{ .name = "inside-caps-lock-color", .has_arg = c.required_argument, .flag = null, .val = lo_inside_caps_lock_color },
-        .{ .name = "inside-ver-color", .has_arg = c.required_argument, .flag = null, .val = lo_inside_ver_color },
-        .{ .name = "inside-wrong-color", .has_arg = c.required_argument, .flag = null, .val = lo_inside_wrong_color },
-        .{ .name = "key-hl-color", .has_arg = c.required_argument, .flag = null, .val = lo_key_hl_color },
-        .{ .name = "layout-bg-color", .has_arg = c.required_argument, .flag = null, .val = lo_layout_bg_color },
-        .{ .name = "layout-border-color", .has_arg = c.required_argument, .flag = null, .val = lo_layout_border_color },
-        .{ .name = "layout-text-color", .has_arg = c.required_argument, .flag = null, .val = lo_layout_txt_color },
-        .{ .name = "line-color", .has_arg = c.required_argument, .flag = null, .val = lo_line_color },
-        .{ .name = "line-clear-color", .has_arg = c.required_argument, .flag = null, .val = lo_line_clear_color },
-        .{ .name = "line-caps-lock-color", .has_arg = c.required_argument, .flag = null, .val = lo_line_caps_lock_color },
-        .{ .name = "line-ver-color", .has_arg = c.required_argument, .flag = null, .val = lo_line_ver_color },
-        .{ .name = "line-wrong-color", .has_arg = c.required_argument, .flag = null, .val = lo_line_wrong_color },
-        .{ .name = "ring-color", .has_arg = c.required_argument, .flag = null, .val = lo_ring_color },
-        .{ .name = "ring-clear-color", .has_arg = c.required_argument, .flag = null, .val = lo_ring_clear_color },
-        .{ .name = "ring-caps-lock-color", .has_arg = c.required_argument, .flag = null, .val = lo_ring_caps_lock_color },
-        .{ .name = "ring-ver-color", .has_arg = c.required_argument, .flag = null, .val = lo_ring_ver_color },
-        .{ .name = "ring-wrong-color", .has_arg = c.required_argument, .flag = null, .val = lo_ring_wrong_color },
-        .{ .name = "separator-color", .has_arg = c.required_argument, .flag = null, .val = lo_sep_color },
-        .{ .name = "text-color", .has_arg = c.required_argument, .flag = null, .val = lo_text_color },
-        .{ .name = "text-clear-color", .has_arg = c.required_argument, .flag = null, .val = lo_text_clear_color },
-        .{ .name = "text-caps-lock-color", .has_arg = c.required_argument, .flag = null, .val = lo_text_caps_lock_color },
-        .{ .name = "text-ver-color", .has_arg = c.required_argument, .flag = null, .val = lo_text_ver_color },
-        .{ .name = "text-wrong-color", .has_arg = c.required_argument, .flag = null, .val = lo_text_wrong_color },
-        .{ .name = "steal-unlock", .has_arg = c.no_argument, .flag = null, .val = lo_steal_unlock },
-        .{ .name = null, .has_arg = 0, .flag = null, .val = 0 },
-    };
-    optind = 1;
-    while (true) {
-        var opt_idx: c_int = 0;
-        const ch = c.getopt_long(
-            argc,
-            argv,
-            "c:deFfhi:kKLlnrs:tuvC:R:",
-            &long_options,
-            &opt_idx,
-        );
-        if (ch == -1) break;
-        switch (ch) {
-            'C' => {
-                if (config_path) |cp|
-                    cp.* = c.strdup(optarg);
-            },
-            'c' => {
-                if (st) |s|
-                    s.args.colors.background = parseColor(optarg);
-            },
-            'd' => log.logInit(log_debug),
-            'e' => {
-                if (st) |s| s.args.ignore_empty = true;
-            },
-            'F' => {
-                if (st) |s| s.args.show_failed_attempts = true;
-            },
-            'f' => {
-                if (st) |s| s.args.daemonize = true;
-            },
-            'R' => {
-                if (st) |s|
-                    s.args.ready_fd = @intCast(
-                        c.strtol(optarg, null, 10),
-                    );
-            },
-            'h' => {
-                _ = c.fprintf(c.stdout, "%s", usage.ptr);
-                c.exit(c.EXIT_SUCCESS);
-            },
-            'i' => {
-                if (st) |s| loadImage(optarg, s);
-            },
-            'k' => {
-                if (st) |s| s.args.show_keyboard_layout = true;
-            },
-            'K' => {
-                if (st) |s| s.args.hide_keyboard_layout = true;
-            },
-            'L' => {
-                if (st) |s| s.args.show_caps_lock_text = false;
-            },
-            'l' => {
-                if (st) |s| s.args.show_caps_lock_indicator = true;
-            },
-            'n' => {
-                if (line_mode) |lm| lm.* = .inside;
-            },
-            'r' => {
-                if (line_mode) |lm| lm.* = .ring;
-            },
-            's' => {
-                if (st) |s| {
-                    s.args.mode = background_image.parseBackgroundMode(
-                        std.mem.sliceTo(optarg, 0),
-                    );
-                    if (s.args.mode == .invalid)
-                        return 1;
-                }
-            },
-            't' => {
-                if (st) |s|
-                    s.args.mode = .tile;
-            },
-            'u' => {
-                if (st) |s| s.args.show_indicator = false;
-            },
-            'v' => {
-                _ = c.fprintf(
-                    c.stdout,
-                    "swaylock version %s\n",
-                    opts.swaylock_version.ptr,
-                );
-                c.exit(c.EXIT_SUCCESS);
-            },
-            lo_bs_hl_color => {
-                if (st) |s|
-                    s.args.colors.bs_highlight =
-                        parseColor(optarg);
-            },
-            lo_caps_lock_bs_hl_color => {
-                if (st) |s|
-                    s.args.colors.caps_lock_bs_highlight =
-                        parseColor(optarg);
-            },
-            lo_caps_lock_key_hl_color => {
-                if (st) |s|
-                    s.args.colors.caps_lock_key_highlight =
-                        parseColor(optarg);
-            },
-            lo_font => {
-                if (st) |s| {
-                    c.free(@ptrCast(s.args.font));
-                    s.args.font = @ptrCast(c.strdup(optarg));
-                }
-            },
-            lo_font_size => {
-                if (st) |s|
-                    s.args.font_size = @intCast(c.atoi(optarg));
-            },
-            lo_ind_idle_visible => {
-                if (st) |s|
-                    s.args.indicator_idle_visible = true;
-            },
-            lo_ind_radius => {
-                if (st) |s|
-                    s.args.radius = @intCast(
-                        c.strtol(optarg, null, 0),
-                    );
-            },
-            lo_ind_thickness => {
-                if (st) |s|
-                    s.args.thickness = @intCast(
-                        c.strtol(optarg, null, 0),
-                    );
-            },
-            lo_ind_x_position => {
-                if (st) |s| {
-                    s.args.override_indicator_x_position = true;
-                    s.args.indicator_x_position =
-                        @intCast(c.atoi(optarg));
-                }
-            },
-            lo_ind_y_position => {
-                if (st) |s| {
-                    s.args.override_indicator_y_position = true;
-                    s.args.indicator_y_position =
-                        @intCast(c.atoi(optarg));
-                }
-            },
-            lo_inside_color => {
-                if (st) |s|
-                    s.args.colors.inside.input = parseColor(optarg);
-            },
-            lo_inside_clear_color => {
-                if (st) |s|
-                    s.args.colors.inside.cleared =
-                        parseColor(optarg);
-            },
-            lo_inside_caps_lock_color => {
-                if (st) |s|
-                    s.args.colors.inside.caps_lock =
-                        parseColor(optarg);
-            },
-            lo_inside_ver_color => {
-                if (st) |s|
-                    s.args.colors.inside.verifying =
-                        parseColor(optarg);
-            },
-            lo_inside_wrong_color => {
-                if (st) |s|
-                    s.args.colors.inside.wrong = parseColor(optarg);
-            },
-            lo_key_hl_color => {
-                if (st) |s|
-                    s.args.colors.key_highlight = parseColor(optarg);
-            },
-            lo_layout_bg_color => {
-                if (st) |s|
-                    s.args.colors.layout_background =
-                        parseColor(optarg);
-            },
-            lo_layout_border_color => {
-                if (st) |s|
-                    s.args.colors.layout_border = parseColor(optarg);
-            },
-            lo_layout_txt_color => {
-                if (st) |s|
-                    s.args.colors.layout_text = parseColor(optarg);
-            },
-            lo_line_color => {
-                if (st) |s|
-                    s.args.colors.line.input = parseColor(optarg);
-            },
-            lo_line_clear_color => {
-                if (st) |s|
-                    s.args.colors.line.cleared = parseColor(optarg);
-            },
-            lo_line_caps_lock_color => {
-                if (st) |s|
-                    s.args.colors.line.caps_lock = parseColor(optarg);
-            },
-            lo_line_ver_color => {
-                if (st) |s|
-                    s.args.colors.line.verifying = parseColor(optarg);
-            },
-            lo_line_wrong_color => {
-                if (st) |s|
-                    s.args.colors.line.wrong = parseColor(optarg);
-            },
-            lo_ring_color => {
-                if (st) |s|
-                    s.args.colors.ring.input = parseColor(optarg);
-            },
-            lo_ring_clear_color => {
-                if (st) |s|
-                    s.args.colors.ring.cleared = parseColor(optarg);
-            },
-            lo_ring_caps_lock_color => {
-                if (st) |s|
-                    s.args.colors.ring.caps_lock = parseColor(optarg);
-            },
-            lo_ring_ver_color => {
-                if (st) |s|
-                    s.args.colors.ring.verifying = parseColor(optarg);
-            },
-            lo_ring_wrong_color => {
-                if (st) |s|
-                    s.args.colors.ring.wrong = parseColor(optarg);
-            },
-            lo_sep_color => {
-                if (st) |s|
-                    s.args.colors.separator = parseColor(optarg);
-            },
-            lo_text_color => {
-                if (st) |s|
-                    s.args.colors.text.input = parseColor(optarg);
-            },
-            lo_text_clear_color => {
-                if (st) |s|
-                    s.args.colors.text.cleared = parseColor(optarg);
-            },
-            lo_text_caps_lock_color => {
-                if (st) |s|
-                    s.args.colors.text.caps_lock = parseColor(optarg);
-            },
-            lo_text_ver_color => {
-                if (st) |s|
-                    s.args.colors.text.verifying = parseColor(optarg);
-            },
-            lo_text_wrong_color => {
-                if (st) |s|
-                    s.args.colors.text.wrong = parseColor(optarg);
-            },
-            lo_steal_unlock => {
-                if (st) |s| s.args.steal_unlock = true;
-            },
-            else => {
-                _ = c.fprintf(c.stderr, "%s", usage.ptr);
-                return 1;
-            },
-        }
-    }
-    return 0;
+fn fileExists(path: []const u8) bool {
+    const file = std.fs.openFileAbsolute(path, .{}) catch return false;
+    file.close();
+    return true;
 }
 
-fn fileExists(path: [*c]const u8) bool {
-    return path != null and c.access(path, c.R_OK) != -1;
-}
+// getConfigPath searches the standard locations for a swaylock config
+// file, returning an allocated slice on success. The caller must free
+// the returned slice using the same allocator.
+fn getConfigPath(allocator: std.mem.Allocator) ?[]u8 {
+    const home = std.posix.getenv("HOME") orelse return null;
+    const xdg = std.posix.getenv("XDG_CONFIG_HOME");
 
-fn getConfigPath() ?[*c]u8 {
-    const xdg_config_home = c.getenv("XDG_CONFIG_HOME");
-    const path2: [*c]const u8 =
-        if (xdg_config_home == null or xdg_config_home[0] == 0)
-            "$HOME/.config/swaylock/config"
-        else
-            "$XDG_CONFIG_HOME/swaylock/config";
+    const path1 = std.fs.path.join(
+        allocator,
+        &.{ home, ".swaylock", "config" },
+    ) catch return null;
+    if (fileExists(path1)) return path1;
+    allocator.free(path1);
+
     // sysconfdir path is comptime-known from build options.
     const path3 = opts.sysconfdir ++ "/swaylock/config";
-    const config_paths = [_][*c]const u8{
-        "$HOME/.swaylock/config",
-        path2,
-        path3,
-    };
-    for (config_paths) |cp| {
-        var p: c.wordexp_t = undefined;
-        if (c.wordexp(cp, &p, 0) == 0) {
-            const path = c.strdup(p.we_wordv[0]);
-            c.wordfree(&p);
-            if (fileExists(path)) return path;
-            c.free(path);
-        }
-    }
+
+    const path2 = if (xdg != null and xdg.?.len > 0)
+        std.fs.path.join(
+            allocator,
+            &.{ xdg.?, "swaylock", "config" },
+        ) catch return null
+    else
+        std.fs.path.join(
+            allocator,
+            &.{ home, ".config", "swaylock", "config" },
+        ) catch return null;
+    if (fileExists(path2)) return path2;
+    allocator.free(path2);
+
+    if (fileExists(path3))
+        return allocator.dupe(u8, path3) catch null;
     return null;
 }
 
 fn loadConfig(
-    path: [*c]u8,
+    path: []const u8,
     st: *types.SwaylockState,
-    line_mode: *LineMode,
+    line_mode: *types.LineMode,
 ) c_int {
-    const config = c.fopen(path, "r");
-    if (config == null) {
+    const file = std.fs.openFileAbsolute(path, .{}) catch {
         log.slog(
-            log_err,
+            log.LogImportance.err,
             @src(),
             "Failed to read config. Running without it.",
             .{},
         );
         return 0;
-    }
-    defer _ = c.fclose(config);
-    var line: [*c]u8 = null;
-    defer c.free(line);
-    var line_size: usize = 0;
-    var line_number: c_int = 0;
+    };
+    defer file.close();
+    const allocator = std.heap.c_allocator;
+    var buf_reader = std.io.bufferedReader(file.reader());
+    const reader = buf_reader.reader();
+    var line_buf: [4096]u8 = undefined;
+    var line_number: usize = 0;
     var result: c_int = 0;
-    while (true) {
-        const nread = c.getline(&line, &line_size, config);
-        if (nread == -1) break;
+    while (reader.readUntilDelimiterOrEof(
+        &line_buf,
+        '\n',
+    ) catch null) |line| {
         line_number += 1;
-        var nread_u: usize = @intCast(nread);
-        if (line[nread_u - 1] == '\n') {
-            nread_u -= 1;
-            line[nread_u] = 0;
-        }
-        if (line[0] == 0 or line[0] == '#') continue;
+        const trimmed = std.mem.trimRight(u8, line, "\r");
+        if (trimmed.len == 0 or trimmed[0] == '#') continue;
         log.slog(
-            log_debug,
+            log.LogImportance.debug,
             @src(),
             "Config Line #{d}: {s}",
-            .{ line_number, line },
+            .{ line_number, trimmed },
         );
-        const flag: [*c]u8 = @ptrCast(c.malloc(nread_u + 3));
-        if (flag == null) {
-            log.slog(log_err, @src(), "Failed to allocate memory", .{});
+        const flag = std.fmt.allocPrintZ(
+            allocator,
+            "--{s}",
+            .{trimmed},
+        ) catch {
+            log.slog(log.LogImportance.err, @src(), "Failed to allocate memory", .{});
             return 0;
-        }
-        _ = c.sprintf(flag, "--%s", line);
+        };
+        defer allocator.free(flag);
         var fake_argv: [2][*c]u8 = .{
             @constCast("swaylock"),
-            flag,
+            @ptrCast(flag.ptr),
         };
-        result = parseOptions(2, &fake_argv, st, line_mode, null);
-        c.free(flag);
+        result = params.parseOptions(2, &fake_argv, st, line_mode, null);
         if (result != 0) break;
     }
     return 0;
@@ -1290,8 +666,8 @@ fn displayIn(
     _ = fd;
     _ = mask;
     _ = data;
-    if (wl.wl_display_dispatch(state.display) == -1)
-        state.run_display = false;
+    if (wl.wl_display_dispatch(g.display) == -1)
+        g.run_display = false;
 }
 
 fn commIn(
@@ -1303,7 +679,7 @@ fn commIn(
     _ = data;
     if ((mask & wl.POLLERR) != 0) {
         log.slog(
-            log_err,
+            log.LogImportance.err,
             @src(),
             "Password checking subprocess crashed; exiting.",
             .{},
@@ -1313,7 +689,7 @@ fn commIn(
     if ((mask & wl.POLLIN) == 0) {
         if ((mask & wl.POLLHUP) != 0) {
             log.slog(
-                log_err,
+                log.LogImportance.err,
                 @src(),
                 "Password checking subprocess exited unexpectedly; exiting.",
                 .{},
@@ -1329,7 +705,7 @@ fn commIn(
     if (msg_type <= 0) {
         if (msg_type == 0) c.exit(c.EXIT_FAILURE);
         log.slog(
-            log_err,
+            log.LogImportance.err,
             @src(),
             "comm_main_read failed; exiting.",
             .{},
@@ -1337,14 +713,14 @@ fn commIn(
         c.exit(c.EXIT_FAILURE);
     }
     log.slog(
-        log_debug,
+        log.LogImportance.debug,
         @src(),
         "comm_in: msg=0x{x:0>2} len={d} auth={s} stage={s}",
         .{
             msg_type,
             len,
-            authStateStr(state.auth_state),
-            authdStageStr(state.authd_stage),
+            authStateStr(g.auth_state),
+            authdStageStr(g.authd_stage),
         },
     );
     const payload_slice: []const u8 =
@@ -1353,138 +729,138 @@ fn commIn(
         types.CommMsg.auth_result => {
             if (len >= 1 and payload != null and payload.?[0] == 0x01) {
                 log.slog(
-                    log_debug,
+                    log.LogImportance.debug,
                     @src(),
                     "comm_in: AUTH_RESULT granted -> unlocking",
                     .{},
                 );
-                state.run_display = false;
+                g.run_display = false;
             } else {
                 log.slog(
-                    log_debug,
+                    log.LogImportance.debug,
                     @src(),
                     "comm_in: AUTH_RESULT denied auth={s} -> invalid",
-                    .{authStateStr(state.auth_state)},
+                    .{authStateStr(g.auth_state)},
                 );
-                state.auth_state = .invalid;
-                password_mod.scheduleAuthIdle(&state);
-                state.failed_attempts += 1;
-                damage_state(&state);
+                g.auth_state = .invalid;
+                password_mod.scheduleAuthIdle(&g);
+                g.failed_attempts += 1;
+                state.damageState(&g);
             }
         },
         types.CommMsg.brokers => {
             // Parse JSON array [{id, name}, ...]
             pam_mod.authdBrokersFree(
-                @ptrCast(state.authd_brokers),
-                state.authd_num_brokers,
+                @ptrCast(g.authd_brokers),
+                g.authd_num_brokers,
             );
-            state.authd_brokers = null;
-            state.authd_num_brokers = 0;
-            state.authd_sel_broker = 0;
+            g.authd_brokers = null;
+            g.authd_num_brokers = 0;
+            g.authd_sel_broker = 0;
             parseBrokers(payload_slice);
-            state.authd_active = true;
-            state.authd_stage = .broker;
+            g.authd_active = true;
+            g.authd_stage = .broker;
             log.slog(
-                log_debug,
+                log.LogImportance.debug,
                 @src(),
                 "comm_in: BROKERS n={d} -> stage=broker",
-                .{state.authd_num_brokers},
+                .{g.authd_num_brokers},
             );
-            damage_state(&state);
+            state.damageState(&g);
         },
         types.CommMsg.auth_modes => {
             // Parse JSON array [{id, label}, ...]
             pam_mod.authdAuthModesFree(
-                @ptrCast(state.authd_auth_modes),
-                state.authd_num_auth_modes,
+                @ptrCast(g.authd_auth_modes),
+                g.authd_num_auth_modes,
             );
-            state.authd_auth_modes = null;
-            state.authd_num_auth_modes = 0;
-            state.authd_sel_auth_mode = 0;
+            g.authd_auth_modes = null;
+            g.authd_num_auth_modes = 0;
+            g.authd_sel_auth_mode = 0;
             parseAuthModes(payload_slice);
-            state.authd_active = true;
-            state.authd_stage = .auth_mode;
+            g.authd_active = true;
+            g.authd_stage = .auth_mode;
             log.slog(
-                log_debug,
+                log.LogImportance.debug,
                 @src(),
                 "comm_in: AUTH_MODES n={d} -> stage=auth_mode",
-                .{state.authd_num_auth_modes},
+                .{g.authd_num_auth_modes},
             );
-            damage_state(&state);
+            state.damageState(&g);
         },
         types.CommMsg.ui_layout => {
             // Parse UILayout JSON object.
-            pam_mod.authdUiLayoutClear(&state.authd_layout);
-            c.free(@ptrCast(state.authd_error));
-            state.authd_error = null;
+            pam_mod.authdUiLayoutClear(&g.authd_layout);
+            c.free(@ptrCast(g.authd_error));
+            g.authd_error = null;
             parseUiLayout(payload_slice);
             log.slog(
-                log_debug,
+                log.LogImportance.debug,
                 @src(),
                 "comm_in: UI_LAYOUT type={s} label={s} entry={s} " ++
                     "wait={d} auth={s} -> idle/challenge",
                 .{
-                    if (state.authd_layout.type) |t| @as([*:0]const u8, t) else "(null)",
-                    if (state.authd_layout.label) |l| @as([*:0]const u8, l) else "(null)",
-                    if (state.authd_layout.entry) |e| @as([*:0]const u8, e) else "(null)",
-                    @intFromBool(state.authd_layout.wait),
-                    authStateStr(state.auth_state),
+                    if (g.authd_layout.type) |t| @as([*:0]const u8, t) else "(null)",
+                    if (g.authd_layout.label) |l| @as([*:0]const u8, l) else "(null)",
+                    if (g.authd_layout.entry) |e| @as([*:0]const u8, e) else "(null)",
+                    @intFromBool(g.authd_layout.wait),
+                    authStateStr(g.auth_state),
                 },
             );
-            state.auth_state = .idle;
-            state.authd_stage = .challenge;
-            damage_state(&state);
+            g.auth_state = .idle;
+            g.authd_stage = .challenge;
+            state.damageState(&g);
         },
         types.CommMsg.stage => {
             if (len >= 1) {
                 const new_stage: types.AuthdStage =
                     @enumFromInt(@as(c_int, payload.?[0]));
-                if (state.auth_state == .validating) {
+                if (g.auth_state == .validating) {
                     log.slog(
-                        log_debug,
+                        log.LogImportance.debug,
                         @src(),
                         "comm_in: STAGE {s} -> {s} while validating:" ++
                             " auth.Retry assumed, auth=validating -> invalid",
                         .{
-                            authdStageStr(state.authd_stage),
+                            authdStageStr(g.authd_stage),
                             authdStageStr(new_stage),
                         },
                     );
-                    state.auth_state = .invalid;
-                    password_mod.scheduleAuthIdle(&state);
-                    state.failed_attempts += 1;
+                    g.auth_state = .invalid;
+                    password_mod.scheduleAuthIdle(&g);
+                    g.failed_attempts += 1;
                 } else {
                     log.slog(
-                        log_debug,
+                        log.LogImportance.debug,
                         @src(),
                         "comm_in: STAGE {s} -> {s} auth={s}",
                         .{
-                            authdStageStr(state.authd_stage),
+                            authdStageStr(g.authd_stage),
                             authdStageStr(new_stage),
-                            authStateStr(state.auth_state),
+                            authStateStr(g.auth_state),
                         },
                     );
                 }
-                state.authd_stage = new_stage;
-                damage_state(&state);
+                g.authd_stage = new_stage;
+                state.damageState(&g);
             }
         },
         types.CommMsg.auth_event => {
             // Intermediate result — show as error/info.
-            c.free(@ptrCast(state.authd_error));
-            state.authd_error = null;
+            c.free(@ptrCast(g.authd_error));
+            g.authd_error = null;
             parseAuthEvent(payload_slice);
             log.slog(
-                log_debug,
+                log.LogImportance.debug,
                 @src(),
                 "comm_in: AUTH_EVENT msg={s} auth={s} -> idle",
                 .{
-                    if (state.authd_error) |e| @as([*:0]const u8, e) else "(null)",
-                    authStateStr(state.auth_state),
+                    if (g.authd_error) |e| @as([*:0]const u8, e) else "(null)",
+                    authStateStr(g.auth_state),
                 },
             );
-            state.auth_state = .idle;
-            damage_state(&state);
+            g.auth_state = .idle;
+            state.damageState(&g);
         },
         else => {},
     }
@@ -1506,8 +882,8 @@ fn parseBrokers(json: []const u8) void {
     const raw = c.calloc(n, @sizeOf(types.AuthdBroker));
     if (raw == null) return;
     const brokers: [*]types.AuthdBroker = @ptrCast(@alignCast(raw));
-    state.authd_brokers = brokers;
-    state.authd_num_brokers = @intCast(n);
+    g.authd_brokers = brokers;
+    g.authd_num_brokers = @intCast(n);
     for (0..n) |i| {
         const item = parsed.value[i];
         brokers[i].id = if (item.id) |s| dupStr(s) else null;
@@ -1531,8 +907,8 @@ fn parseAuthModes(json: []const u8) void {
     const raw = c.calloc(n, @sizeOf(types.AuthdAuthMode));
     if (raw == null) return;
     const modes: [*]types.AuthdAuthMode = @ptrCast(@alignCast(raw));
-    state.authd_auth_modes = modes;
-    state.authd_num_auth_modes = @intCast(n);
+    g.authd_auth_modes = modes;
+    g.authd_num_auth_modes = @intCast(n);
     for (0..n) |i| {
         const item = parsed.value[i];
         modes[i].id = if (item.id) |s| dupStr(s) else null;
@@ -1558,19 +934,19 @@ fn parseUiLayout(json: []const u8) void {
     ) catch return;
     defer parsed.deinit();
     const layout = parsed.value;
-    state.authd_layout.type =
+    g.authd_layout.type =
         if (layout.type) |s| dupStr(s) else null;
-    state.authd_layout.label =
+    g.authd_layout.label =
         if (layout.label) |s| dupStr(s) else null;
-    state.authd_layout.button =
+    g.authd_layout.button =
         if (layout.button) |s| dupStr(s) else null;
-    state.authd_layout.entry =
+    g.authd_layout.entry =
         if (layout.entry) |s| dupStr(s) else null;
-    state.authd_layout.wait =
+    g.authd_layout.wait =
         if (layout.wait) |w| std.mem.eql(u8, w, "true") else false;
-    state.authd_layout.qr_content =
+    g.authd_layout.qr_content =
         if (layout.content) |s| dupStr(s) else null;
-    state.authd_layout.qr_code =
+    g.authd_layout.qr_code =
         if (layout.code) |s| dupStr(s) else null;
 }
 
@@ -1585,7 +961,7 @@ fn parseAuthEvent(json: []const u8) void {
         .{ .ignore_unknown_fields = true },
     ) catch return;
     defer parsed.deinit();
-    state.authd_error =
+    g.authd_error =
         if (parsed.value.msg) |s| dupStr(s) else null;
 }
 
@@ -1597,38 +973,23 @@ fn termIn(
     _ = fd;
     _ = mask;
     _ = data;
-    state.run_display = false;
+    g.run_display = false;
 }
 
 // Check for --debug early so the child process also gets the right
-// log level before full option parsing runs.
+// Scan argv early for -d/--debug so the log level is set before
+// full option parsing runs.
 fn logInit(argc: c_int, argv: [*c][*c]u8) void {
-    const long_options = [_]c.struct_option{
-        .{
-            .name = "debug",
-            .has_arg = c.no_argument,
-            .flag = null,
-            .val = 'd',
-        },
-        .{ .name = null, .has_arg = 0, .flag = null, .val = 0 },
-    };
-    optind = 1;
-    while (true) {
-        var opt_idx: c_int = 0;
-        const ch = c.getopt_long(
-            argc,
-            argv,
-            "-:d",
-            &long_options,
-            &opt_idx,
-        );
-        if (ch == -1) break;
-        if (ch == 'd') {
-            log.logInit(log_debug);
+    for (1..@as(usize, @intCast(argc))) |i| {
+        const arg = std.mem.sliceTo(argv[i], 0);
+        if (std.mem.eql(u8, arg, "-d") or
+            std.mem.eql(u8, arg, "--debug"))
+        {
+            log.logInit(log.LogImportance.debug);
             return;
         }
     }
-    log.logInit(log_err);
+    log.logInit(log.LogImportance.err);
 }
 
 export fn main(argc: c_int, argv: [*c][*c]u8) c_int {
@@ -1636,91 +997,94 @@ export fn main(argc: c_int, argv: [*c][*c]u8) c_int {
     pam_mod.initializePwBackend(argc, argv);
     _ = c.srand(@intCast(wl.time(null)));
 
-    var line_mode: LineMode = .line;
-    state.failed_attempts = 0;
-    state.authd_active = false;
-    state.authd_stage = .none;
-    state.authd_brokers = null;
-    state.authd_num_brokers = 0;
-    state.authd_sel_broker = -1;
-    state.authd_auth_modes = null;
-    state.authd_num_auth_modes = 0;
-    state.authd_sel_auth_mode = -1;
-    state.authd_layout = std.mem.zeroes(types.AuthdUiLayout);
-    state.authd_error = null;
-    state.args = std.mem.zeroes(types.SwaylockArgs);
-    state.args.mode = .fill;
-    state.args.font = @ptrCast(c.strdup("sans-serif"));
-    state.args.font_size = 0;
-    state.args.radius = 50;
-    state.args.thickness = 10;
-    state.args.indicator_x_position = 0;
-    state.args.indicator_y_position = 0;
-    state.args.override_indicator_x_position = false;
-    state.args.override_indicator_y_position = false;
-    state.args.ignore_empty = false;
-    state.args.show_indicator = true;
-    state.args.show_caps_lock_indicator = false;
-    state.args.show_caps_lock_text = true;
-    state.args.show_keyboard_layout = false;
-    state.args.hide_keyboard_layout = false;
-    state.args.show_failed_attempts = false;
-    state.args.indicator_idle_visible = false;
-    state.args.ready_fd = -1;
-    wl.wl_list_init(&state.images);
-    setDefaultColors(&state.args.colors);
+    var line_mode: types.LineMode = .line;
+    g.failed_attempts = 0;
+    g.authd_active = false;
+    g.authd_stage = .none;
+    g.authd_brokers = null;
+    g.authd_num_brokers = 0;
+    g.authd_sel_broker = -1;
+    g.authd_auth_modes = null;
+    g.authd_num_auth_modes = 0;
+    g.authd_sel_auth_mode = -1;
+    g.authd_layout = std.mem.zeroes(types.AuthdUiLayout);
+    g.authd_error = null;
+    g.args = std.mem.zeroes(types.SwaylockArgs);
+    g.args.mode = .fill;
+    g.args.font = @ptrCast(c.strdup("sans-serif"));
+    g.args.font_size = 0;
+    g.args.radius = 50;
+    g.args.thickness = 10;
+    g.args.indicator_x_position = 0;
+    g.args.indicator_y_position = 0;
+    g.args.override_indicator_x_position = false;
+    g.args.override_indicator_y_position = false;
+    g.args.ignore_empty = false;
+    g.args.show_indicator = true;
+    g.args.show_caps_lock_indicator = false;
+    g.args.show_caps_lock_text = true;
+    g.args.show_keyboard_layout = false;
+    g.args.hide_keyboard_layout = false;
+    g.args.show_failed_attempts = false;
+    g.args.indicator_idle_visible = false;
+    g.args.ready_fd = -1;
 
-    var config_path: [*c]u8 = null;
-    var result = parseOptions(argc, argv, null, null, &config_path);
+    setDefaultColors(&g.args.colors);
+
+    var config_path_c: [*c]u8 = null;
+    var result = params.parseOptions(argc, argv, null, null, &config_path_c);
     if (result != 0) {
-        c.free(config_path);
+        if (config_path_c != null) c.free(config_path_c);
         return result;
     }
-    if (config_path == null)
-        config_path = getConfigPath() orelse null;
-    if (config_path != null) {
+    var config_path: ?[]u8 = null;
+    if (config_path_c != null) {
+        config_path = std.mem.sliceTo(config_path_c, 0);
+    } else {
+        config_path = getConfigPath(std.heap.c_allocator);
+    }
+    defer if (config_path) |p| std.heap.c_allocator.free(p);
+    if (config_path) |path| {
         log.slog(
-            log_debug,
+            log.LogImportance.debug,
             @src(),
             "Found config at {s}",
-            .{config_path},
+            .{path},
         );
-        const config_status =
-            loadConfig(config_path, &state, &line_mode);
-        c.free(config_path);
+        const config_status = loadConfig(path, &g, &line_mode);
         if (config_status != 0) {
-            c.free(@ptrCast(state.args.font));
+            c.free(@ptrCast(g.args.font));
             return config_status;
         }
     }
     if (argc > 1) {
-        log.slog(log_debug, @src(), "Parsing CLI Args", .{});
-        result = parseOptions(argc, argv, &state, &line_mode, null);
+        log.slog(log.LogImportance.debug, @src(), "Parsing CLI Args", .{});
+        result = params.parseOptions(argc, argv, &g, &line_mode, null);
         if (result != 0) {
-            c.free(@ptrCast(state.args.font));
+            c.free(@ptrCast(g.args.font));
             return result;
         }
     }
     if (line_mode == .inside) {
-        state.args.colors.line = state.args.colors.inside;
+        g.args.colors.line = g.args.colors.inside;
     } else if (line_mode == .ring) {
-        state.args.colors.line = state.args.colors.ring;
+        g.args.colors.line = g.args.colors.ring;
     }
 
-    state.password.len = 0;
-    state.password.buffer_len = 1024;
-    state.password.buffer =
-        password_buffer.passwordBufferCreate(state.password.buffer_len);
-    if (state.password.buffer == null) return c.EXIT_FAILURE;
-    state.password.buffer.?[0] = 0;
+    g.password.len = 0;
+    g.password.buffer_len = 1024;
+    g.password.buffer =
+        password_buffer.passwordBufferCreate(g.password.buffer_len);
+    if (g.password.buffer == null) return c.EXIT_FAILURE;
+    g.password.buffer.?[0] = 0;
 
     if (c.pipe(@ptrCast(&sigusr_fds)) != 0) {
-        log.slog(log_err, @src(), "Failed to pipe", .{});
+        log.slog(log.LogImportance.err, @src(), "Failed to pipe", .{});
         return c.EXIT_FAILURE;
     }
     if (c.fcntl(sigusr_fds[1], c.F_SETFL, c.O_NONBLOCK) == -1) {
         log.slog(
-            log_err,
+            log.LogImportance.err,
             @src(),
             "Failed to make pipe end nonblocking",
             .{},
@@ -1728,14 +1092,14 @@ export fn main(argc: c_int, argv: [*c][*c]u8) c_int {
         return c.EXIT_FAILURE;
     }
 
-    wl.wl_list_init(&state.surfaces);
-    state.xkb.context =
+    wl.wl_list_init(&g.surfaces);
+    g.xkb.context =
         types.c.xkb_context_new(types.c.XKB_CONTEXT_NO_FLAGS);
-    state.display = wl.wl_display_connect(null);
-    if (state.display == null) {
-        c.free(@ptrCast(state.args.font));
+    g.display = wl.wl_display_connect(null);
+    if (g.display == null) {
+        c.free(@ptrCast(g.args.font));
         log.slog(
-            log_err,
+            log.LogImportance.err,
             @src(),
             "Unable to connect to the compositor. " ++
                 "If your compositor is running, check or set the " ++
@@ -1744,18 +1108,18 @@ export fn main(argc: c_int, argv: [*c][*c]u8) c_int {
         );
         return c.EXIT_FAILURE;
     }
-    state.eventloop = loop.loopCreate();
+    g.eventloop = loop.loopCreate();
 
     const registry =
-        wl.wl_display_get_registry(state.display);
+        wl.wl_display_get_registry(g.display);
     _ = wl.wl_registry_add_listener(
         registry,
         &registry_listener,
-        &state,
+        &g,
     );
-    if (wl.wl_display_roundtrip(state.display) == -1) {
+    if (wl.wl_display_roundtrip(g.display) == -1) {
         log.slog(
-            log_err,
+            log.LogImportance.err,
             @src(),
             "wl_display_roundtrip() failed",
             .{},
@@ -1763,21 +1127,21 @@ export fn main(argc: c_int, argv: [*c][*c]u8) c_int {
         return c.EXIT_FAILURE;
     }
 
-    if (state.compositor == null) {
-        log.slog(log_err, @src(), "Missing wl_compositor", .{});
+    if (g.compositor == null) {
+        log.slog(log.LogImportance.err, @src(), "Missing wl_compositor", .{});
         return 1;
     }
-    if (state.subcompositor == null) {
-        log.slog(log_err, @src(), "Missing wl_subcompositor", .{});
+    if (g.subcompositor == null) {
+        log.slog(log.LogImportance.err, @src(), "Missing wl_subcompositor", .{});
         return 1;
     }
-    if (state.shm == null) {
-        log.slog(log_err, @src(), "Missing wl_shm", .{});
+    if (g.shm == null) {
+        log.slog(log.LogImportance.err, @src(), "Missing wl_shm", .{});
         return 1;
     }
-    if (state.ext_session_lock_manager_v1 == null) {
+    if (g.ext_session_lock_manager_v1 == null) {
         log.slog(
-            log_err,
+            log.LogImportance.err,
             @src(),
             "Missing ext-session-lock-v1",
             .{},
@@ -1785,20 +1149,20 @@ export fn main(argc: c_int, argv: [*c][*c]u8) c_int {
         return 1;
     }
 
-    if (state.args.steal_unlock) {
-        state.ext_session_lock_v1 =
+    if (g.args.steal_unlock) {
+        g.ext_session_lock_v1 =
             wl.ext_session_lock_manager_v1_lock(
-                state.ext_session_lock_manager_v1,
+                g.ext_session_lock_manager_v1,
             );
         _ = wl.ext_session_lock_v1_add_listener(
-            state.ext_session_lock_v1,
+            g.ext_session_lock_v1,
             &ext_session_lock_v1_listener,
-            &state,
+            &g,
         );
-        while (!state.locked and !state.lock_failed) {
-            if (wl.wl_display_dispatch(state.display) < 0) {
+        while (!g.locked and !g.lock_failed) {
+            if (wl.wl_display_dispatch(g.display) < 0) {
                 log.slog(
-                    log_err,
+                    log.LogImportance.err,
                     @src(),
                     "wl_display_dispatch() failed",
                     .{},
@@ -1806,9 +1170,9 @@ export fn main(argc: c_int, argv: [*c][*c]u8) c_int {
                 return 1;
             }
         }
-        if (!state.locked) {
+        if (!g.locked) {
             log.slog(
-                log_err,
+                log.LogImportance.err,
                 @src(),
                 "Compositor refused the lock; " ++
                     "another locker may still be connected.",
@@ -1817,35 +1181,35 @@ export fn main(argc: c_int, argv: [*c][*c]u8) c_int {
             return 1;
         }
         wl.ext_session_lock_v1_unlock_and_destroy(
-            state.ext_session_lock_v1,
+            g.ext_session_lock_v1,
         );
-        _ = wl.wl_display_roundtrip(state.display);
+        _ = wl.wl_display_roundtrip(g.display);
         return 0;
     }
 
-    state.ext_session_lock_v1 =
+    g.ext_session_lock_v1 =
         wl.ext_session_lock_manager_v1_lock(
-            state.ext_session_lock_manager_v1,
+            g.ext_session_lock_manager_v1,
         );
     _ = wl.ext_session_lock_v1_add_listener(
-        state.ext_session_lock_v1,
+        g.ext_session_lock_v1,
         &ext_session_lock_v1_listener,
-        &state,
+        &g,
     );
 
-    if (wl.wl_display_roundtrip(state.display) == -1) {
-        c.free(@ptrCast(state.args.font));
+    if (wl.wl_display_roundtrip(g.display) == -1) {
+        c.free(@ptrCast(g.args.font));
         return 1;
     }
 
-    state.test_surface = types.c.cairo_image_surface_create(
+    g.test_surface = types.c.cairo_image_surface_create(
         types.c.CAIRO_FORMAT_RGB24,
         1,
         1,
     );
-    state.test_cairo = types.c.cairo_create(state.test_surface);
+    g.test_cairo = types.c.cairo_create(g.test_surface);
 
-    const head = &state.surfaces;
+    const head = &g.surfaces;
     var node = head.next;
     while (node != head) {
         const surface =
@@ -1854,10 +1218,10 @@ export fn main(argc: c_int, argv: [*c][*c]u8) c_int {
         createSurface(surface);
     }
 
-    while (!state.locked) {
-        if (wl.wl_display_dispatch(state.display) < 0) {
+    while (!g.locked) {
+        if (wl.wl_display_dispatch(g.display) < 0) {
             log.slog(
-                log_err,
+                log.LogImportance.err,
                 @src(),
                 "wl_display_dispatch() failed",
                 .{},
@@ -1866,37 +1230,37 @@ export fn main(argc: c_int, argv: [*c][*c]u8) c_int {
         }
     }
 
-    if (state.args.ready_fd >= 0) {
-        if (c.write(state.args.ready_fd, "\n", 1) != 1) {
+    if (g.args.ready_fd >= 0) {
+        if (c.write(g.args.ready_fd, "\n", 1) != 1) {
             log.slog(
-                log_err,
+                log.LogImportance.err,
                 @src(),
                 "Failed to send readiness notification",
                 .{},
             );
             return 2;
         }
-        _ = c.close(state.args.ready_fd);
-        state.args.ready_fd = -1;
+        _ = c.close(g.args.ready_fd);
+        g.args.ready_fd = -1;
     }
-    if (state.args.daemonize) daemonize();
+    if (g.args.daemonize) daemonize();
 
     loop.loopAddFd(
-        state.eventloop.?,
-        wl.wl_display_get_fd(state.display),
+        g.eventloop.?,
+        wl.wl_display_get_fd(g.display),
         @as(i16, @intCast(wl.POLLIN)),
         displayIn,
         null,
     );
     loop.loopAddFd(
-        state.eventloop.?,
+        g.eventloop.?,
         comm.getCommReplyFd(),
         @as(i16, @intCast(wl.POLLIN)),
         commIn,
         null,
     );
     loop.loopAddFd(
-        state.eventloop.?,
+        g.eventloop.?,
         sigusr_fds[0],
         @as(i16, @intCast(wl.POLLIN)),
         termIn,
@@ -1923,23 +1287,23 @@ export fn main(argc: c_int, argv: [*c][*c]u8) c_int {
         _ = c.atexit(debugUnlockOnExit);
     }
 
-    state.run_display = true;
-    while (state.run_display) {
+    g.run_display = true;
+    while (g.run_display) {
         c.__errno_location().* = 0;
-        if (wl.wl_display_flush(state.display) == -1 and
+        if (wl.wl_display_flush(g.display) == -1 and
             c.__errno_location().* != c.EAGAIN)
         {
             break;
         }
-        loop.loopPoll(state.eventloop.?);
+        loop.loopPoll(g.eventloop.?);
     }
 
-    wl.ext_session_lock_v1_unlock_and_destroy(state.ext_session_lock_v1);
-    state.ext_session_lock_v1 = null;
-    _ = wl.wl_display_roundtrip(state.display);
+    wl.ext_session_lock_v1_unlock_and_destroy(g.ext_session_lock_v1);
+    g.ext_session_lock_v1 = null;
+    _ = wl.wl_display_roundtrip(g.display);
 
-    c.free(@ptrCast(state.args.font));
-    types.c.cairo_destroy(state.test_cairo);
-    types.c.cairo_surface_destroy(state.test_surface);
+    c.free(@ptrCast(g.args.font));
+    types.c.cairo_destroy(g.test_cairo);
+    types.c.cairo_surface_destroy(g.test_surface);
     return 0;
 }

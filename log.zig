@@ -5,21 +5,18 @@ const std = @import("std");
 const opts = @import("log_options");
 const types = @import("types.zig");
 
-// Importance levels – derived from the shared types enum.
-const log_silent: i32 = @intFromEnum(types.LogImportance.silent);
-const log_error: i32 = @intFromEnum(types.LogImportance.err);
-const log_info: i32 = @intFromEnum(types.LogImportance.info);
-const log_debug: i32 = @intFromEnum(types.LogImportance.debug);
-const log_importance_last: i32 = @intFromEnum(types.LogImportance.last);
-
-const verbosity_colors = [_][]const u8{
-    "", // LOG_SILENT
-    "\x1B[1;31m", // LOG_ERROR
-    "\x1B[1;34m", // LOG_INFO
-    "\x1B[1;90m", // LOG_DEBUG
+/// Log verbosity levels
+pub const LogImportance = enum(u32) {
+    silent = 0,
+    err = 1,
+    info = 2,
+    debug = 3,
+    last = 4,
 };
 
-var log_importance: i32 = log_error;
+const verbosity_colors = [LogImportance][]const u8{};
+
+var log_importance = LogImportance.err;
 
 /// Line count and length for the debug overlay ring buffer.
 /// These must match LOG_OVERLAY_LINES / LOG_OVERLAY_LINE_LEN in log.h.
@@ -37,16 +34,18 @@ var overlay: if (opts.have_debug_overlay) OverlayState else void =
     if (opts.have_debug_overlay) std.mem.zeroes(OverlayState) else {};
 
 /// Sets the global log verbosity threshold.
-pub fn logInit(verbosity: i32) void {
-    if (verbosity < log_importance_last) {
+pub fn logInit(verbosity: LogImportance) void {
+    if (@intFromEnum(verbosity) < @intFromEnum(LogImportance.last)) {
         log_importance = verbosity;
+    } else {
+        log_importance = LogImportance.debug;
     }
 }
 
 /// Emits a log line to stderr with a UTC timestamp and optional
 /// ANSI colour.
-pub fn swayLog(verbosity: i32, msg: []const u8) void {
-    if (verbosity > log_importance) return;
+fn swayLog(verbosity: LogImportance, msg: []const u8) void {
+    if (@intFromEnum(verbosity) > @intFromEnum(log_importance)) return;
 
     if (comptime opts.have_debug_overlay) {
         const line = &overlay.ring[overlay.head];
@@ -88,11 +87,13 @@ pub fn swayLog(verbosity: i32, msg: []const u8) void {
     const w = bw.writer();
     w.writeAll(ts) catch {};
     if (use_color) {
-        const vi: usize = @min(
-            @as(usize, @intCast(verbosity)),
-            verbosity_colors.len - 1,
-        );
-        w.writeAll(verbosity_colors[vi]) catch {};
+        w.writeAll(switch (verbosity) {
+            LogImportance.silent => "", // LOG_SILENT
+            LogImportance.err => "\x1B[1;31m", // LOG_ERROR
+            LogImportance.info => "\x1B[1;34m", // LOG_INFO
+            LogImportance.debug => "\x1B[1;90m", // LOG_DEBUG
+            else => "",
+        }) catch {};
     }
     w.writeAll(msg) catch {};
     if (use_color) w.writeAll("\x1B[0m") catch {};
@@ -102,7 +103,7 @@ pub fn swayLog(verbosity: i32, msg: []const u8) void {
 
 /// Emits a formatted log line with source location prepended.
 pub fn slog(
-    verbosity: i32,
+    verbosity: LogImportance,
     src: std.builtin.SourceLocation,
     comptime fmt: []const u8,
     args: anytype,
@@ -142,7 +143,7 @@ pub fn getOverlay(count_out: *i32) ?[*][overlay_line_len]u8 {
 }
 
 /// Strips leading "./" path components from a file path literal.
-pub fn stripPath(filepath: []const u8) []const u8 {
+fn stripPath(filepath: []const u8) []const u8 {
     if (filepath.len == 0 or filepath[0] != '.') return filepath;
     var i: usize = 0;
     while (i < filepath.len and

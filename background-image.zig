@@ -11,8 +11,6 @@ const c = types.c;
 
 const log = @import("log.zig");
 
-const log_err: i32 = @intFromEnum(types.LogImportance.err);
-
 // Reuse the GdkPixbuf opaque type from cairo.zig so that the type
 // passed to gdkCairoImageSurfaceCreateFromPixbuf is compatible.
 const cairo_mod = @import("cairo.zig");
@@ -50,7 +48,7 @@ pub fn parseBackgroundMode(mode: []const u8) types.BackgroundMode {
         return types.BackgroundMode.solid_color;
     }
     log.slog(
-        log_err,
+        log.LogImportance.err,
         @src(),
         "Unsupported background mode: {s}",
         .{mode},
@@ -76,7 +74,7 @@ pub fn loadBackgroundImage(
             else
                 "unknown error";
             log.slog(
-                log_err,
+                log.LogImportance.err,
                 @src(),
                 "Failed to load background image ({s}).",
                 .{msg},
@@ -94,7 +92,7 @@ pub fn loadBackgroundImage(
     }
     if (image == null) {
         log.slog(
-            log_err,
+            log.LogImportance.err,
             @src(),
             "Failed to read background image.",
             .{},
@@ -108,14 +106,14 @@ pub fn loadBackgroundImage(
         );
         if (comptime opts.have_gdk_pixbuf) {
             log.slog(
-                log_err,
+                log.LogImportance.err,
                 @src(),
                 "Failed to read background image: {s}.",
                 .{status_str},
             );
         } else {
             log.slog(
-                log_err,
+                log.LogImportance.err,
                 @src(),
                 "Failed to read background image: {s}.\n" ++
                     "Swaylock was compiled without gdk_pixbuf " ++

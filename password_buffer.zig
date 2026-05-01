@@ -13,13 +13,12 @@ const c = @cImport({
     @cInclude("unistd.h");
 });
 
-const log_err: i32 = @intFromEnum(types.LogImportance.err);
 const log = @import("log.zig");
 
 var mlock_supported: bool = true;
 
 fn slogErrno(
-    verbosity: i32,
+    verbosity: log.LogImportance,
     src: std.builtin.SourceLocation,
     comptime fmt: []const u8,
 ) void {
@@ -35,7 +34,7 @@ fn passwordBufferLock(addr: [*]u8, size: usize) bool {
             retries -= 1;
             if (retries == 0) {
                 log.slog(
-                    log_err,
+                    log.LogImportance.err,
                     @src(),
                     "mlock() supported but failed too often.",
                     .{},
@@ -44,7 +43,7 @@ fn passwordBufferLock(addr: [*]u8, size: usize) bool {
             }
         } else if (err == @intFromEnum(std.posix.E.PERM)) {
             slogErrno(
-                log_err,
+                log.LogImportance.err,
                 @src(),
                 "Unable to mlock() password memory: Unsupported!",
             );
@@ -52,7 +51,7 @@ fn passwordBufferLock(addr: [*]u8, size: usize) bool {
             return true;
         } else {
             slogErrno(
-                log_err,
+                log.LogImportance.err,
                 @src(),
                 "Unable to mlock() password memory.",
             );
@@ -67,7 +66,7 @@ fn passwordBufferUnlock(addr: [*]u8, size: usize) bool {
     if (mlock_supported) {
         if (c.munlock(@ptrCast(addr), size) != 0) {
             slogErrno(
-                log_err,
+                log.LogImportance.err,
                 @src(),
                 "Unable to munlock() password memory.",
             );
@@ -93,7 +92,7 @@ pub fn passwordBufferCreate(size: usize) ?[*]u8 {
         // posix_memalign does not set errno per the man page.
         std.c._errno().* = result;
         slogErrno(
-            log_err,
+            log.LogImportance.err,
             @src(),
             "failed to alloc password buffer",
         );

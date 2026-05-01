@@ -4,8 +4,6 @@
 const std = @import("std");
 const types = @import("types.zig");
 
-const log_err: i32 = @intFromEnum(types.LogImportance.err);
-
 const log = @import("log.zig");
 const password_buffer = @import("password_buffer.zig");
 
@@ -17,7 +15,7 @@ const comm_max_payload: usize = 1 << 20;
 var comm_fds: [2][2]i32 = .{ .{ -1, -1 }, .{ -1, -1 } };
 
 fn slogErrno(
-    verbosity: i32,
+    verbosity: log.LogImportance,
     src: std.builtin.SourceLocation,
     comptime msg: []const u8,
     err: anyerror,
@@ -30,13 +28,13 @@ fn readFull(fd: i32, dst: []u8) isize {
     while (offset < dst.len) {
         const n = std.posix.read(fd, dst[offset..]) catch |err| {
             if (err == error.Interrupted) continue;
-            slogErrno(log_err, @src(), "read() failed", err);
+            slogErrno(log.LogImportance.err, @src(), "read() failed", err);
             return -1;
         };
         if (n == 0) {
             if (offset == 0) return 0;
             log.slog(
-                log_err,
+                log.LogImportance.err,
                 @src(),
                 "read() failed: unexpected EOF",
                 .{},
@@ -53,11 +51,11 @@ fn writeFull(fd: i32, src: []const u8) bool {
     while (offset < src.len) {
         const n = std.posix.write(fd, src[offset..]) catch |err| {
             if (err == error.Interrupted) continue;
-            slogErrno(log_err, @src(), "write() failed", err);
+            slogErrno(log.LogImportance.err, @src(), "write() failed", err);
             return false;
         };
         if (n == 0) {
-            log.slog(log_err, @src(), "write() returned 0", .{});
+            log.slog(log.LogImportance.err, @src(), "write() returned 0", .{});
             return false;
         }
         offset += n;
@@ -99,7 +97,7 @@ fn commRead(
     const plen: usize = loadLe32(&plen_buf);
     if (plen > comm_max_payload) {
         log.slog(
-            log_err,
+            log.LogImportance.err,
             @src(),
             "comm_read: payload too large: {d}",
             .{plen},
@@ -111,7 +109,7 @@ fn commRead(
     if (plen > 0) {
         buf = @ptrCast(std.c.malloc(plen + 1));
         if (buf == null) {
-            log.slog(log_err, @src(), "allocation failed", .{});
+            log.slog(log.LogImportance.err, @src(), "allocation failed", .{});
             payload.* = null;
             return -1;
         }
@@ -206,17 +204,17 @@ pub fn writeCommPassword(pw: *types.SwaylockPassword) bool {
 /// Spawns the comm child process.
 pub fn spawnCommChild(child_fn: *const fn () void) bool {
     const fds0 = std.posix.pipe() catch |err| {
-        slogErrno(log_err, @src(), "failed to create pipe", err);
+        slogErrno(log.LogImportance.err, @src(), "failed to create pipe", err);
         return false;
     };
     comm_fds[0] = fds0;
     const fds1 = std.posix.pipe() catch |err| {
-        slogErrno(log_err, @src(), "failed to create pipe", err);
+        slogErrno(log.LogImportance.err, @src(), "failed to create pipe", err);
         return false;
     };
     comm_fds[1] = fds1;
     const child = std.posix.fork() catch |err| {
-        slogErrno(log_err, @src(), "failed to fork", err);
+        slogErrno(log.LogImportance.err, @src(), "failed to fork", err);
         return false;
     };
     if (child == 0) {
