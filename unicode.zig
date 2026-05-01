@@ -44,14 +44,6 @@ pub fn utf8Encode(str: [*c]u8, ch: u32) usize {
     return encodeManual(str, ch);
 }
 
-/// Returns the byte length of the next UTF-8 character at s[0],
-/// or -1 if s[0] is a continuation byte or otherwise invalid.
-pub fn utf8Size(s: [*c]const u8) i32 {
-    const n = std.unicode.utf8ByteSequenceLength(s[0]) catch
-        return -1;
-    return @intCast(n);
-}
-
 // Encodes ch without Unicode validation, matching the C
 // implementation for surrogates and out-of-range codepoints.
 fn encodeManual(str: [*c]u8, ch_in: u32) usize {

@@ -105,7 +105,7 @@ fn destroySurface(surface: *types.SwaylockSurface) void {
         wl.wl_surface_destroy(surface.surface);
     pool_buffer.destroyBuffer(&surface.indicator_buffers[0]);
     pool_buffer.destroyBuffer(&surface.indicator_buffers[1]);
-    if (opts.have_debug_overlay) {
+    if (comptime opts.have_debug_overlay) {
         if (surface.overlay_sub != null)
             wl.wl_subsurface_destroy(surface.overlay_sub);
         if (surface.overlay != null)
@@ -141,7 +141,7 @@ fn createSurface(surface: *types.SwaylockSurface) void {
     );
     std.debug.assert(surface.subsurface != null);
     wl.wl_subsurface_set_sync(surface.subsurface);
-    if (opts.have_debug_overlay) {
+    if (comptime opts.have_debug_overlay) {
         surface.overlay =
             wl.wl_compositor_create_surface(st.compositor);
         std.debug.assert(surface.overlay != null);
@@ -461,15 +461,16 @@ fn doSigusr(
     _ = c.write(sigusr_fds[1], "1", 1);
 }
 
-fn debugUnlockOnExit() callconv(std.builtin.CallingConvention.c) void {
-    if (g.ext_session_lock_v1 != null) {
-        wl.ext_session_lock_v1_unlock_and_destroy(
-            g.ext_session_lock_v1,
-        );
-        g.ext_session_lock_v1 = null;
-        if (g.display != null)
-            _ = wl.wl_display_flush(g.display);
+fn debugUnlockOnExit() void {
+    if (g.ext_session_lock_v1 == null) {
+        return;
     }
+    wl.ext_session_lock_v1_unlock_and_destroy(
+        g.ext_session_lock_v1,
+    );
+    g.ext_session_lock_v1 = null;
+    if (g.display != null)
+        _ = wl.wl_display_flush(g.display);
 }
 
 fn debugUnlockOnCrash(
@@ -631,14 +632,14 @@ fn loadConfig(
     return 0;
 }
 
-fn authStateStr(s: types.AuthState) [*c]const u8 {
+fn authStateStr(s: types.AuthState) []const u8 {
     if (s == .idle) return "idle";
     if (s == .validating) return "validating";
     if (s == .invalid) return "invalid";
     return "unknown";
 }
 
-fn authdStageStr(s: types.AuthdStage) [*c]const u8 {
+fn authdStageStr(s: types.AuthdStage) []const u8 {
     if (s == .none) return "none";
     if (s == .broker) return "broker";
     if (s == .auth_mode) return "auth_mode";
@@ -981,6 +982,8 @@ fn logInit(argc: c_int, argv: [*c][*c]u8) void {
 }
 
 export fn main(argc: c_int, argv: [*c][*c]u8) c_int {
+    defer if (comptime opts.have_debug_unlock_on_crash) debugUnlockOnExit();
+
     logInit(argc, argv);
     pam_mod.initializePwBackend(argc, argv);
     _ = c.srand(@intCast(wl.time(null)));
@@ -1249,24 +1252,24 @@ export fn main(argc: c_int, argv: [*c][*c]u8) c_int {
         null,
     );
 
-    var sa: c.struct_sigaction = std.mem.zeroes(c.struct_sigaction);
-    sa.__sigaction_handler.sa_handler = doSigusr;
-    _ = c.sigemptyset(&sa.sa_mask);
-    sa.sa_flags = c.SA_RESTART;
-    _ = c.sigaction(c.SIGUSR1, &sa, null);
+    const sa = std.posix.Sigaction{
+        .handler = .{ .handler = doSigusr },
+        .mask = std.posix.empty_sigset,
+        .flags = std.posix.SA.RESTART,
+    };
+    std.posix.sigaction(std.posix.SIG.USR1, &sa, null);
 
-    if (opts.have_debug_unlock_on_crash) {
-        var crash_sa: c.struct_sigaction =
-            std.mem.zeroes(c.struct_sigaction);
-        crash_sa.__sigaction_handler.sa_handler = debugUnlockOnCrash;
-        _ = c.sigemptyset(&crash_sa.sa_mask);
-        crash_sa.sa_flags = c.SA_RESETHAND;
-        _ = c.sigaction(c.SIGSEGV, &crash_sa, null);
-        _ = c.sigaction(c.SIGABRT, &crash_sa, null);
-        _ = c.sigaction(c.SIGBUS, &crash_sa, null);
-        _ = c.sigaction(c.SIGILL, &crash_sa, null);
-        _ = c.sigaction(c.SIGFPE, &crash_sa, null);
-        _ = c.atexit(debugUnlockOnExit);
+    if (comptime opts.have_debug_unlock_on_crash) {
+        const crash_sa = std.posix.Sigaction{
+            .handler = .{ .handler = debugUnlockOnCrash },
+            .mask = std.posix.empty_sigset,
+            .flags = std.posix.SA.RESETHAND,
+        };
+        std.posix.sigaction(std.posix.SIG.SEGV, &crash_sa, null);
+        std.posix.sigaction(std.posix.SIG.ABRT, &crash_sa, null);
+        std.posix.sigaction(std.posix.SIG.BUS, &crash_sa, null);
+        std.posix.sigaction(std.posix.SIG.ILL, &crash_sa, null);
+        std.posix.sigaction(std.posix.SIG.FPE, &crash_sa, null);
     }
 
     g.run_display = true;
