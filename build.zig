@@ -224,7 +224,7 @@ pub fn build(b: *std.Build) void {
     // Single declared Zig module; other .zig files are reached
     // via @import chains from main.zig.
     const main_mod = b.createModule(.{
-        .root_source_file = b.path("main.zig"),
+        .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
@@ -235,7 +235,7 @@ pub fn build(b: *std.Build) void {
     main_mod.addImport("background_image_options", gfx_options_mod);
     main_mod.addImport("render_options", render_options.createModule());
     main_mod.addImport("allocator", b.createModule(.{
-        .root_source_file = b.path("allocator.zig"),
+        .root_source_file = b.path("src/allocator.zig"),
     }));
     const clap_dep = b.dependency("clap", .{
         .target = target,
