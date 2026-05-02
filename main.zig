@@ -23,6 +23,7 @@ const password_buffer = @import("password_buffer.zig");
 
 const pam_mod = @import("pam.zig");
 const allocator_mod = @import("allocator");
+const landlock = @import("landlock.zig");
 
 var sigusr_fds: [2]i32 = .{ -1, -1 };
 var g: types.State = std.mem.zeroes(types.State);
@@ -1307,6 +1308,7 @@ export fn main(argc: c_int, argv: [*c][*c]u8) c_int {
         g.args.ready_fd = -1;
     }
     if (g.args.daemonize) daemonize();
+    landlock.applyToMain();
 
     loop.loopAddFd(
         g.eventloop.?,

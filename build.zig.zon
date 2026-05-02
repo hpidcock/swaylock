@@ -1,7 +1,7 @@
 .{
-    .name = .@"swaylock-authd",
+    .name = .swaylock_authd,
     .version = "1.0.0",
-    .fingerprint = 0xff93bdec5d0e41ee,
+    .fingerprint = 0x9816fc4b88bb29b7,
     .minimum_zig_version = "0.14.0",
     .dependencies = .{
         .clap = .{

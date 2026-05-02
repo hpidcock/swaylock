@@ -5,6 +5,7 @@ const types = @import("types.zig");
 
 const log = @import("log.zig");
 const password_buffer = @import("password_buffer.zig");
+const landlock = @import("landlock.zig");
 
 /// Maximum payload size accepted from the pipe (1 MiB).
 /// Prevents unbounded allocation from malformed messages.
@@ -236,6 +237,7 @@ pub fn spawnCommChild(child_fn: *const fn () void) bool {
             std.posix.dup2(devnull, 1) catch {};
             if (devnull > 1) std.posix.close(devnull);
         } else |_| {}
+        landlock.applyToPamChild();
         child_fn();
         // child_fn never returns.
         unreachable;
