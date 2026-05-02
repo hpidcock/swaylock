@@ -743,9 +743,7 @@ fn handleConversation(
 }
 
 /// Spawns the comm child process for PAM authentication.
-pub fn initializePwBackend(argc: c_int, argv: [*c][*c]u8) void {
-    _ = argc;
-    _ = argv;
+pub fn initializePwBackend() void {
     if (!comm.spawnCommChild(runPwBackendChild)) std.process.exit(1);
 }
 

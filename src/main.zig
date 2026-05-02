@@ -1036,13 +1036,40 @@ fn logInit(argc: c_int, argv: [*c][*c]u8) void {
     log.logInit(log.LogImportance.err);
 }
 
+/// Drops root privileges by resetting effective UID and GID to
+/// the real (unprivileged) values. Must be called after the PAM
+/// child has been spawned, which retains the elevated credentials
+/// it needs. Exits on failure.
+fn dropRootPrivileges() void {
+    if (std.os.linux.setgid(std.os.linux.getgid()) != 0) {
+        log.slog(
+            log.LogImportance.err,
+            @src(),
+            "setgid failed",
+            .{},
+        );
+        std.process.exit(1);
+    }
+    if (std.os.linux.setuid(std.os.linux.getuid()) != 0) {
+        log.slog(
+            log.LogImportance.err,
+            @src(),
+            "setuid failed",
+            .{},
+        );
+        std.process.exit(1);
+    }
+}
+
 export fn main(argc: c_int, argv: [*c][*c]u8) c_int {
     defer if (comptime opts.have_debug_unlock_on_crash) debugUnlockOnExit();
     allocator_mod.init();
     defer allocator_mod.deinit();
 
     logInit(argc, argv);
-    pam_mod.initializePwBackend(argc, argv);
+
+    pam_mod.initializePwBackend();
+    dropRootPrivileges();
 
     var line_mode: types.LineMode = .line;
     g.failed_attempts = 0;
