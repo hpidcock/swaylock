@@ -12,26 +12,96 @@ const c = @cImport({
     @cDefine("_DEFAULT_SOURCE", "1");
     @cInclude("pwd.h");
     @cInclude("security/pam_appl.h");
-    @cInclude("gdm/gdm-custom-json-pam-extension.h");
+    @cInclude("stdlib.h");
 });
 
-/// Shims compiled from pam_gdm_shim.c to avoid Zig's C translator
-/// choking on GNU statement-expression macros in the GDM headers.
-extern fn pam_shim_gdm_advertise_extensions() void;
-extern fn pam_shim_gdm_request_init(
-    req: *c.GdmPamExtensionJSONProtocol,
+// GDM PAM extension types – derived from gdm-custom-json-pam-extension.h
+// and gdm-pam-extensions-common.h.  The GNU statement-expression macros
+// from those headers are re-implemented below as plain Zig functions.
+const GdmPamExtensionMessage = extern struct {
+    length: u32,
+    type: u8,
+};
+
+/// GDM PAM extension JSON protocol message structure.
+const GdmPamExtensionJSONProtocol = extern struct {
+    header: GdmPamExtensionMessage,
+    protocol_name: [64]u8,
+    version: c_uint,
     json: [*c]u8,
-) void;
+};
+
+const authd_gdm_json_proto_name = "com.ubuntu.authd.gdm";
+const authd_gdm_json_proto_version: c_uint = 1;
+const gdm_pam_extension_custom_json =
+    "org.gnome.DisplayManager.UserVerifier.CustomJSON";
+
+// Static buffer for putenv – must persist for the process lifetime
+// because putenv does not copy its argument.
+var gdm_pam_ext_env = std.mem.zeroes([4096]u8);
+
+/// Advertise the authd GDM JSON extension to any PAM module loaded in
+/// this process by setting GDM_SUPPORTED_PAM_EXTENSIONS.
+fn gdmAdvertiseExtensions() void {
+    const env_str = "GDM_SUPPORTED_PAM_EXTENSIONS=" ++
+        gdm_pam_extension_custom_json;
+    @memcpy(gdm_pam_ext_env[0..env_str.len], env_str);
+    gdm_pam_ext_env[env_str.len] = 0;
+    _ = c.putenv(@as([*c]u8, @ptrCast(&gdm_pam_ext_env)));
+}
+
+// Look up the index of name within GDM_SUPPORTED_PAM_EXTENSIONS.
+// Returns null when the variable is unset or the name is absent.
+fn gdmLookUpType(name: []const u8) ?u8 {
+    const env_ptr = c.getenv(
+        "GDM_SUPPORTED_PAM_EXTENSIONS",
+    ) orelse return null;
+    var it = std.mem.tokenizeScalar(
+        u8,
+        std.mem.span(env_ptr),
+        ' ',
+    );
+    var t: u8 = 0;
+    while (it.next()) |token| {
+        if (std.mem.eql(u8, token, name)) return t;
+        if (t == std.math.maxInt(u8)) break;
+        t += 1;
+    }
+    return null;
+}
+
+/// Initialise a GDM PAM extension JSON protocol request with the authd
+/// protocol name, version and the given JSON string.  The json pointer
+/// is stored as-is; the caller must free it separately.
+fn gdmRequestInit(
+    req: *GdmPamExtensionJSONProtocol,
+    json: [*c]u8,
+) void {
+    req.header.type =
+        gdmLookUpType(gdm_pam_extension_custom_json) orelse 0;
+    req.header.length = std.mem.nativeToBig(
+        u32,
+        @sizeOf(GdmPamExtensionJSONProtocol),
+    );
+    const proto_len = @min(
+        authd_gdm_json_proto_name.len,
+        req.protocol_name.len - 1,
+    );
+    @memcpy(
+        req.protocol_name[0..proto_len],
+        authd_gdm_json_proto_name[0..proto_len],
+    );
+    req.protocol_name[proto_len] = 0;
+    req.version = authd_gdm_json_proto_version;
+    req.json = json;
+}
 
 /// Returns true when the GDM PAM message carries the expected authd
 /// protocol name ("com.ubuntu.authd.gdm") and version (1).
-fn gdmMessageIsValid(msg: *const c.GdmPamExtensionJSONProtocol) bool {
-    if (msg.version != 1) return false;
-    const name = std.mem.sliceTo(
-        @as([*:0]const u8, @ptrCast(&msg.protocol_name)),
-        0,
-    );
-    return std.mem.eql(u8, name, "com.ubuntu.authd.gdm");
+fn gdmMessageIsValid(msg: *const GdmPamExtensionJSONProtocol) bool {
+    if (msg.version != authd_gdm_json_proto_version) return false;
+    const name = std.mem.sliceTo(&msg.protocol_name, 0);
+    return std.mem.eql(u8, name, authd_gdm_json_proto_name);
 }
 
 // jsonStringifyAllocBytes serialises v to JSON, returning an
@@ -648,7 +718,7 @@ fn handleConversation(
                 // by the authd GDM JSON protocol.
                 if (comptime @hasDecl(c, "PAM_BINARY_PROMPT")) {
                     if (msg[idx].*.msg_style == c.PAM_BINARY_PROMPT) {
-                        const ext: *const c.GdmPamExtensionJSONProtocol =
+                        const ext: *const GdmPamExtensionJSONProtocol =
                             @ptrCast(@alignCast(msg[idx].*.msg));
                         if (!gdmMessageIsValid(ext))
                             return c.PAM_ABORT;
@@ -657,7 +727,7 @@ fn handleConversation(
                             return c.PAM_ABORT;
                         const raw = std.c.calloc(
                             1,
-                            @sizeOf(c.GdmPamExtensionJSONProtocol),
+                            @sizeOf(GdmPamExtensionJSONProtocol),
                         );
                         if (raw == null) {
                             std.heap.c_allocator.free(
@@ -665,9 +735,9 @@ fn handleConversation(
                             );
                             return c.PAM_ABORT;
                         }
-                        const reply: *c.GdmPamExtensionJSONProtocol =
+                        const reply: *GdmPamExtensionJSONProtocol =
                             @ptrCast(@alignCast(raw));
-                        pam_shim_gdm_request_init(reply, response);
+                        gdmRequestInit(reply, response);
                         pam_reply[idx].resp = @ptrCast(reply);
                         continue;
                     }
@@ -700,7 +770,7 @@ pub fn initializePwBackend(argc: c_int, argv: [*c][*c]u8) void {
 /// Run the PAM authentication loop in the child process.  Never returns.
 pub fn runPwBackendChild() void {
     if (std.posix.access("/run/authd.sock", 0)) |_|
-        pam_shim_gdm_advertise_extensions()
+        gdmAdvertiseExtensions()
     else |_| {}
 
     const passwd_ptr = c.getpwuid(

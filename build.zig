@@ -159,7 +159,6 @@ pub fn build(b: *std.Build) void {
         else
             "-DHAVE_DEBUG_UNLOCK_ON_CRASH=0",
     ) catch @panic("OOM");
-    const c_flags = flags.toOwnedSlice(b.allocator) catch @panic("OOM");
 
     // Protocol glue only needs basic flags, no feature defines.
     var proto_flags_list: std.ArrayListUnmanaged([]const u8) = .{
@@ -293,9 +292,7 @@ pub fn build(b: *std.Build) void {
             proto_flags,
         ),
     );
-    exe_mod.addObjectFile(
-        ctx.cobj(b.path("pam_gdm_shim.c"), "pam_gdm_shim", c_flags),
-    );
+
     exe_mod.linkSystemLibrary("pam", .{});
     exe_mod.linkSystemLibrary("wayland-client", .{});
     exe_mod.linkSystemLibrary("xkbcommon", .{});
