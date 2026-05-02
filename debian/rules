@@ -2,8 +2,10 @@
 
 ZIG_FLAGS =
 
-ifneq (,$(filter true,$(DEBUG_OVERLAY)))
-ZIG_FLAGS += -Ddebug-overlay=true
+ifneq (,$(filter true,$(CFG_DEBUG)))
+ZIG_FLAGS += -Ddebug-overlay=true -Ddebug-unlock-on-crash=true
+else
+ZIG_FLAGS += -Doptimize=ReleaseSafe
 endif
 
 %:
@@ -31,7 +33,7 @@ override_dh_auto_install:
 		$(CURDIR)/debian/swaylock/usr/share/fish/vendor_completions.d/swaylock.fish
 
 override_dh_strip:
-	$(if $(filter true,$(DEBUG_OVERLAY)),true,dh_strip)
+	$(if $(filter true,$(CFG_DEBUG)),true,dh_strip)
 
 override_dh_fixperms:
 	dh_fixperms -Xswaylock

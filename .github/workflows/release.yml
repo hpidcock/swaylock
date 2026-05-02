@@ -3,8 +3,8 @@ name: Release
 on:
   workflow_dispatch:
     inputs:
-      debug_overlay:
-        description: "Enable debug overlay"
+      debug:
+        description: "Debug"
         type: boolean
         default: false
 
@@ -38,11 +38,11 @@ jobs:
 
       - name: Set package version
         env:
-          DEBUG_OVERLAY: ${{ inputs.debug_overlay }}
+          CFG_DEBUG: ${{ inputs.debug }}
         run: |
           short_sha=$(git rev-parse --short HEAD)
           version=$(sed -n '1s/^swaylock-authd (\([^)]*\)).*/\1/p' debian/changelog)
-          if [ "$DEBUG_OVERLAY" = "true" ]; then
+          if [ "$CFG_DEBUG" = "true" ]; then
             new_version="${version}+dbg+g${short_sha}"
           else
             new_version="${version}+g${short_sha}"
@@ -71,7 +71,7 @@ jobs:
 
       - name: Build package
         env:
-          DEBUG_OVERLAY: ${{ inputs.debug_overlay }}
+          CFG_DEBUG: ${{ inputs.debug }}
         run: dpkg-buildpackage -us -uc -b
 
       - name: Collect artifacts
@@ -85,12 +85,12 @@ jobs:
       - name: Create release and upload artifacts
         env:
           GH_TOKEN: ${{ github.token }}
-          DEBUG_OVERLAY: ${{ inputs.debug_overlay }}
+          CFG_DEBUG: ${{ inputs.debug }}
         run: |
           short_sha=$(git rev-parse --short HEAD)
           version=$(dpkg-parsechangelog --show-field Version)
           prerelease=""
-          if [ "$DEBUG_OVERLAY" = "true" ]; then
+          if [ "$CFG_DEBUG" = "true" ]; then
             prerelease="--prerelease"
           fi
           gh release create "$short_sha" \

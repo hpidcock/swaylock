@@ -1,6 +1,8 @@
 #!/bin/sh
 set -eu
 
+CFG_DEBUG="${CFG_DEBUG:-false}"
+
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 CONTAINER="swaylock-authd-build-$$"
 OUTPUT_DIR="${SCRIPT_DIR}/build-output"
@@ -59,7 +61,8 @@ tar -C "$SCRIPT_DIR" \
 		sh -c 'mkdir -p /root/swaylock-authd && tar -C /root/swaylock-authd -xzf -'
 
 echo "Building package..."
-lxc exec "$CONTAINER" --cwd /root/swaylock-authd -- \
+lxc exec "$CONTAINER" --cwd /root/swaylock-authd \
+	--env CFG_DEBUG="$CFG_DEBUG" -- \
 	dpkg-buildpackage -us -uc -b
 
 echo "Retrieving build artifacts..."
@@ -68,5 +71,9 @@ lxc exec "$CONTAINER" -- \
 		swaylock-authd_*.buildinfo swaylock-authd_*.changes' \
 	| tar -C "$OUTPUT_DIR" -xzf -
 
-echo "Build complete. Artifacts in: $OUTPUT_DIR"
+if [ "$CFG_DEBUG" = "true" ]; then
+	echo "Build complete (debug). Artifacts in: $OUTPUT_DIR"
+else
+	echo "Build complete. Artifacts in: $OUTPUT_DIR"
+fi
 ls -lh "$OUTPUT_DIR/"
