@@ -20,7 +20,6 @@ override_dh_auto_test:
 
 override_dh_auto_install:
 	zig build $(ZIG_FLAGS) \
-		-Dpam=true \
 		-Dgdk-pixbuf=true \
 		--prefix $(CURDIR)/debian/swaylock/usr
 	install -Dm644 swaylock.1 \
