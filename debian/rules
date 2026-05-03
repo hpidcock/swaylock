@@ -21,19 +21,19 @@ override_dh_auto_test:
 override_dh_auto_install:
 	zig build $(ZIG_FLAGS) \
 		-Dgdk-pixbuf=true \
-		--prefix $(CURDIR)/debian/swaylock/usr
+		--prefix $(CURDIR)/debian/swaylock-authd/usr
 	install -Dm644 swaylock.1 \
-		$(CURDIR)/debian/swaylock/usr/share/man/man1/swaylock.1
+		$(CURDIR)/debian/swaylock-authd/usr/share/man/man1/swaylock.1
 	install -Dm644 completions/bash/swaylock \
-		$(CURDIR)/debian/swaylock/usr/share/bash-completion/completions/swaylock
+		$(CURDIR)/debian/swaylock-authd/usr/share/bash-completion/completions/swaylock
 	install -Dm644 completions/zsh/_swaylock \
-		$(CURDIR)/debian/swaylock/usr/share/zsh/vendor-completions/_swaylock
+		$(CURDIR)/debian/swaylock-authd/usr/share/zsh/vendor-completions/_swaylock
 	install -Dm644 completions/fish/swaylock.fish \
-		$(CURDIR)/debian/swaylock/usr/share/fish/vendor_completions.d/swaylock.fish
+		$(CURDIR)/debian/swaylock-authd/usr/share/fish/vendor_completions.d/swaylock.fish
 
 override_dh_strip:
 	$(if $(filter true,$(CFG_DEBUG)),true,dh_strip)
 
 override_dh_fixperms:
 	dh_fixperms -Xswaylock
-	chmod 4755 debian/swaylock/usr/bin/swaylock
+	chmod 4755 debian/swaylock-authd/usr/bin/swaylock
