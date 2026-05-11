@@ -150,7 +150,7 @@ fn render_debug_overlay(surface: *types.Surface) void {
         var i: i32 = start;
         while (i < count) : (i += 1) {
             wl.cairo_move_to(cr, pad, y);
-            wl.cairo_show_text(cr, @ptrCast(&lines[@intCast(i)]));
+            wl.cairo_show_text(cr, @ptrCast(&lines.?[@intCast(i)]));
             y += fd(line_h);
         }
 
