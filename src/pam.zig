@@ -168,6 +168,7 @@ const ConvState = struct {
     pending_count: usize = 0,
     user_selected_sent: bool = false,
     username: [*:0]const u8,
+    cached_password: ?[]u8 = null,
 };
 
 // Sends bytes over the IPC channel then frees the slice.
@@ -613,43 +614,64 @@ fn handleConversation(
             c.PAM_PROMPT_ECHO_OFF,
             c.PAM_PROMPT_ECHO_ON,
             => {
-                // Notify main we need a credential. Transitions
-                // validating -> invalid -> idle if needed.
-                const stage_byte: [1]u8 = .{@intCast(
-                    @intFromEnum(types.AuthdStage.challenge),
-                )};
-                comm.commChildWrite(
-                    types.CommMsg.stage,
-                    &stage_byte,
-                );
-                log.slog(
-                    log.LogImportance.debug,
-                    @src(),
-                    "handle_conversation: PAM_PROMPT" ++
-                        " sent STAGE, waiting for password",
-                    .{},
-                );
+                var password: []u8 = undefined;
+                if (state.cached_password) |cached| {
+                    log.slog(
+                        log.LogImportance.debug,
+                        @src(),
+                        "handle_conversation: using cached password for retry",
+                        .{},
+                    );
+                    password = cached;
+                } else {
+                    // Notify main we need a credential. Transitions
+                    // validating -> invalid -> idle if needed.
+                    const stage_byte: [1]u8 = .{@intCast(
+                        @intFromEnum(types.AuthdStage.challenge),
+                    )};
+                    comm.commChildWrite(
+                        types.CommMsg.stage,
+                        &stage_byte,
+                    );
+                    log.slog(
+                        log.LogImportance.debug,
+                        @src(),
+                        "handle_conversation: PAM_PROMPT" ++
+                            " sent STAGE, waiting for password",
+                        .{},
+                    );
 
-                var read = comm.commChildRead();
-                while (read.msg_type != @as(i32, types.CommMsg.password)) {
-                    if (read.msg_type <= 0) return c.PAM_ABORT;
-                    if (read.payload.len > 0) std.c.free(read.payload.ptr);
-                    read = comm.commChildRead();
+                    var read = comm.commChildRead();
+                    while (read.msg_type != @as(i32, types.CommMsg.password)) {
+                        if (read.msg_type <= 0) return c.PAM_ABORT;
+                        if (read.payload.len > 0) std.c.free(read.payload.ptr);
+                        read = comm.commChildRead();
+                    }
+                    log.slog(
+                        log.LogImportance.debug,
+                        @src(),
+                        "handle_conversation: PAM_PROMPT got password (len={d})",
+                        .{read.payload.len},
+                    );
+
+                    const pw_buffer = password_buffer.create(read.payload.len) orelse {
+                        password_buffer.zero(read.payload);
+                        std.c.free(read.payload.ptr);
+                        log.slog(log.LogImportance.err, @src(), "allocation failed", .{});
+                        return c.PAM_ABORT;
+                    };
+                    @memcpy(pw_buffer, read.payload);
+                    password_buffer.zero(read.payload);
+                    std.c.free(read.payload.ptr);
+                    state.cached_password = pw_buffer;
+                    password = state.cached_password.?;
                 }
-                log.slog(
-                    log.LogImportance.debug,
-                    @src(),
-                    "handle_conversation: PAM_PROMPT got password (len={d})",
-                    .{read.payload.len},
-                );
 
-                const pw_copy = std.heap.c_allocator.dupeZ(
+                const pam_pw_copy = std.heap.c_allocator.dupeZ(
                     u8,
-                    read.payload,
+                    password,
                 ) catch null;
-                password_buffer.zero(read.payload);
-                std.c.free(read.payload.ptr);
-                pam_reply[idx].resp = if (pw_copy) |d| d.ptr else null;
+                pam_reply[idx].resp = if (pam_pw_copy) |d| d.ptr else null;
                 if (pam_reply[idx].resp == null) {
                     log.slog(log.LogImportance.err, @src(), "allocation failed", .{});
                     return c.PAM_ABORT;
@@ -798,6 +820,17 @@ pub fn runPwBackendChild() noreturn {
                         ),
                     },
                 );
+                if (pam_status == c.PAM_SYSTEM_ERR and
+                    conv_state.cached_password != null)
+                {
+                    log.slog(
+                        log.LogImportance.debug,
+                        @src(),
+                        "PAM_SYSTEM_ERR, retrying with cached password",
+                        .{},
+                    );
+                    continue;
+                }
                 if (pam_status == c.PAM_PERM_DENIED or
                     pam_status == c.PAM_CRED_INSUFFICIENT)
                 {
@@ -817,6 +850,10 @@ pub fn runPwBackendChild() noreturn {
             if (pam_status != c.PAM_AUTH_ERR) break;
         }
 
+        if (conv_state.cached_password) |pw| {
+            password_buffer.destroy(pw);
+            conv_state.cached_password = null;
+        }
         _ = c.pam_setcred(auth_handle, c.PAM_REFRESH_CRED);
         if (c.pam_end(auth_handle, pam_status) != c.PAM_SUCCESS) {
             log.slog(
